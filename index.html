@@ -255,6 +255,20 @@ const SOILS = [
   ['are_l15','Arena liviana, 15 % de agua',1.0,2.1,0.047,0.093],
   ['are_l5','Arena liviana, 5 % de agua',0.9,1.9,0.055,0.12]
 ];
+// Materiales de capas de piso. k en W/(m·K). Hormigones y morteros: "Lista de materiales" de la Municipalidad de Rosario (valores de λ; la lista no cita la norma).
+// Aislantes: ASHRAE 2010, cap. 24, Tabla 1 (los de INSUL). rol: 'losa' (estructura) o 'aisl' (aislación), solo lo usa el método de losa sobre terreno.
+const FLOORMATS = [
+  ['horm24','Hormigón normal de piedra, 2400 kg/m³',1.63,'losa'],
+  ['horm25','Hormigón normal de piedra, 2500 kg/m³',1.74,'losa'],
+  ['hormarm','Hormigón armado H21, 2500 kg/m³',2.30,'losa'],
+  ['cascote','Hormigón de cascotes, 1600 kg/m³',0.76,'losa'],
+  ['carpeta','Mortero de cemento y arena (carpeta)',1.16,'losa']
+].concat(INSUL.filter(m => m[0] !== 'otro').map(m => [m[0], m[1].replace(/ \(.*\)/, ''), m[2], 'aisl'])).concat([['otro','Otro (k manual)',NaN,'losa']]);
+const floorMat = (id) => FLOORMATS.filter(m => m[0] === id)[0];
+const newLayer = (mat, esp) => { const m = floorMat(mat); return {mat: mat, esp: esp == null ? NaN : esp, k: m ? m[2] : NaN, rol: m ? m[3] : 'losa'}; };
+const layerR = (l) => n(l.k) > 0 ? n(l.esp)/1000/n(l.k) : 0;
+const floorThk = (f) => f.mode === 'capas' ? (f.layers || []).reduce((a, l) => a + n(l.esp), 0) : n(f.esp);
+// (Sin uso por ahora: la interfaz calcula el piso por capas. Se deja para cuando haya información del paper de 2000.)
 // Losa sobre terreno: método simplificado de Krarti y Chuangchid (1999), Ec. 6.35 a 6.37 y Tabla 6.5 del libro de Krarti
 // "Energy Audit of Building Systems". Transcripto del texto del libro y verificado con sus tres ejemplos resueltos.
 // cfg: 'none' o 'uniform' (aislación uniforme), 'partH' (parcial horizontal), 'partV' (parcial vertical).
@@ -303,9 +317,10 @@ function calc(S){
   const area = L*Wd, volGeo = L*Wd*H;
   // Volumen interior: medidas exteriores menos espesores (solo se usa en el método de cambios de aire)
   const eW = S.walls.map(w => n(w.esp)/1000);
-  const volInt = Math.max(0, L - eW[1] - eW[3])*Math.max(0, Wd - eW[0] - eW[2])*Math.max(0, H - n(S.ceil.esp)/1000 - n(S.floor.esp)/1000);
+  const volInt = Math.max(0, L - eW[1] - eW[3])*Math.max(0, Wd - eW[0] - eW[2])*Math.max(0, H - n(S.ceil.esp)/1000 - floorThk(S.floor)/1000);
   const vol = n(g.vol) > 0 ? n(g.vol) : volInt;
   const Ue = (s) => {
+    if (s.mode === 'capas'){ const den = n(c.rsi) + n(c.rse) + (s.layers || []).reduce((a, l) => a + layerR(l), 0); return den > 0 ? 1/den : 0; }
     if (s.mode === 'mat'){ const k = n(s.k); const den = n(c.rsi) + n(c.rse) + (k > 0 ? n(s.esp)/1000/k : 0); return den > 0 ? 1/den : 0; }
     return n(s.U);
   };
@@ -316,17 +331,9 @@ function calc(S){
     return {A, U, To, dT, ins, dsun, sunMissing: sunOn && !w.sunSurf, sol, tot: ins + sol};
   });
   const wallsTot = walls.reduce((a, w) => a + w.tot, 0);
-  // Cap. 23: con calefacción bajo piso la carga se calcula con 40 °F de terreno bajo la aislación. Solo se usa si no se ingresó temperatura.
-  const fSet = Number.isFinite(S.floor.tBelow), fAuto = !fSet && S.floor.tipo === 'calef';
-  const fU = Ue(S.floor), fTo = fAuto ? (40 - 32)*F2K : n(S.floor.tBelow), fdT = fTo - Tr;
-  let floor = {A: area, U: fU, To: fTo, dT: fdT, tot: area*fU*fdT, auto: fAuto};
-  if (S.floor.tipo === 'losa'){
-    const P = n(S.floor.P) > 0 ? n(S.floor.P) : 2*(L + Wd), Ri = fU > 0 ? 1/fU : 0;
-    const k = slabKrarti({cfg: S.floor.cfg, AP: P > 0 ? area/P : 0, ks: n(S.floor.ks), als: n(S.floor.als)*1e-7, Rf: n(S.floor.Rf), Ri: Ri, c: n(S.floor.c)});
-    const Tm = n(S.floor.tMed), Tamp = n(S.floor.tAmp);
-    floor = {A: area, U: k.ok ? k.Um : 0, To: Tm, dT: Tm - Tr, tot: k.ok ? area*(k.Um*(Tm - Tr) + k.Ua*Tamp) : 0, auto: false, losa: k, P: P, AP: P > 0 ? area/P : 0, Ri: Ri, Tamp: Tamp,
-      Qm: k.ok ? area*k.Um*(Tm - Tr) : 0, Qa: k.ok ? area*k.Ua*Tamp : 0};
-  }
+  // Piso por capas, tratado como una pared: U · A · Δt con la temperatura bajo el piso ingresada.
+  const fU = Ue(S.floor), fTo = n(S.floor.tBelow), fdT = fTo - Tr;
+  const floor = {A: area, U: fU, To: fTo, dT: fdT, tot: area*fU*fdT};
   const cU = Ue(S.ceil), cTo = S.ceil.tipo === 'ext' ? Ta : n(S.ceil.tAbove), cdT = cTo - Tr;
   const cSunOn = S.ceil.tipo === 'ext' && !!S.ceil.sol, cDsun = cSunOn ? sunAllow(S.ceil, hemi, true) : 0;
   const cIns = area*cU*cdT, cSol = area*cU*cDsun;
@@ -398,7 +405,7 @@ function newCase(){
     cond:{sitio:'', tAmb:NaN, rhAmb:NaN, tRoom:NaN, rhRoom:NaN, horas:NaN, cont:NaN, metodo:'mult', hemi:'sur', rsi:0, rse:0},
     geo:{L:NaN, W:NaN, H:NaN, vol:NaN},
     walls:[baseWall({orient:'N'}), baseWall({orient:'E'}), baseWall({orient:'S'}), baseWall({orient:'O'})],
-    floor:{tipo:'manual', tBelow:NaN, mode:'U', U:NaN, mat:'pur', k:0.026, esp:NaN, ciudad:'', tMed:NaN, tAmp:NaN, suelo:'', ks:NaN, als:NaN, cfg:'none', Rf:NaN, c:NaN, P:NaN},
+    floor:{tBelow:NaN, mode:'capas', layers:[newLayer('horm24'), newLayer('pur'), newLayer('horm24')]},
     ceil:{tipo:'ext', tAbove:NaN, mode:'U', U:NaN, mat:'pur', k:0.026, esp:NaN, sol:false, sunSurf:'', dTsol:NaN},
     infil:{metodo:'puertas', td:24, ac:NaN, doors:[baseDoor()]},
     prod:{id:'', respMode:'manual', name:'', mass:NaN, tIn:NaN, tOut:NaN, hrs:24, tFr:NaN, shA:NaN, shB:NaN, lat:NaN, resp:NaN, stored:NaN, sev:1},
@@ -457,26 +464,9 @@ function prodSelect(){
   });
   return '<label class="f wide"><span class="lb">Producto de la base de datos ASHRAE (' + PROD.length + ')</span><span class="in"><select id="f-prod-id" data-k="prod.id">' + o + '</select></span></label>';
 }
-var FLOOROPTS = [['manual','Temperatura ingresada'],['losa','Losa sobre terreno (cámaras sobre 0 °C)'],['calef','Congelados con calefacción bajo piso'],['ventilado','Tubos o ductos ventilados con aire'],['local','Sobre local o sótano']];
-var FLOORHINT = {
-  manual: 'Ingresá la temperatura bajo la aislación del piso.',
-  losa: 'Método simplificado de Krarti y Chuangchid (1999): carga de la losa como media anual más amplitud anual, con el aire exterior del sitio. No es el paper de 2000 que cita el ASHRAE. No contempla calefacción bajo piso: no sirve para congelados. Es una estimación.',
-  calef: 'Con calefacción bajo piso (aire o glicol por ductos o caños, o resistencias), el cap. 23 calcula la pérdida con 4,4 °C (40 °F) de terreno bajo la aislación. Si dejás vacía la temperatura se usa ese valor.',
-  ventilado: 'El cap. 23 admite tubos bajo el piso ventilados con aire ambiente en climas cálidos para evitar el levantamiento por congelamiento. La temperatura bajo la aislación depende del diseño: ingresala.',
-  local: 'Ingresá la temperatura del local o sótano que está debajo.'
-};
-var CITYOPTS = [['','Elegir o ingresar a mano…']].concat(CITIES.map(function(c){ return [c[0], c[1]]; }));
-var SOILOPTS = [['','Elegir o ingresar a mano…']].concat(SOILS.map(function(s){ return [s[0], s[1]]; }));
 var DESOPTS = [['','Elegir o ingresar a mano…']].concat(CITIES.filter(function(c){ return c[5] != null; }).map(function(c){ return [c[0], c[1] + ' (' + String(c[5]).replace('.', ',') + ' °C)']; }));
-var CFGOPTS = [['none','Sin aislación bajo la losa'],['uniform','Aislación uniforme (toda la losa)'],['partH','Aislación parcial horizontal (perímetro)'],['partV','Aislación parcial vertical (borde)']];
-function applyCity(id){
-  var c = CITIES.filter(function(x){ return x[0] === id; })[0]; if (!c) return;
-  S.floor.tMed = c[2]; S.floor.tAmp = c[3]; sync('floor.tMed'); sync('floor.tAmp');
-}
-function applySoil(id){
-  var s = SOILS.filter(function(x){ return x[0] === id; })[0]; if (!s) return;
-  S.floor.ks = s[3]; S.floor.als = Math.round(s[5]/86400*1e9)/100; sync('floor.ks'); sync('floor.als');
-}
+var FLOORMATOPTS = FLOORMATS.map(function(m){ return [m[0], m[1]]; });
+
 var HPOPTS = [['','Elegir…']].concat(MOTORS.map(function(r){ return [String(r[0]), String(r[0]).replace('.', ',') + ' hp']; }));
 var LOCOPTS = [['A','Motor y equipo dentro de la cámara'],['B','Motor fuera, equipo dentro'],['C','Motor dentro, equipo fuera']];
 function motorPick(){
@@ -567,15 +557,14 @@ function buildForm(){
   '<p class="hint" id="minInsHint"></p><p class="hint">El aumento de Δt por sol sale de la Tabla 3 del ASHRAE según orientación y tipo de superficie. La tabla no distingue hemisferio: en el hemisferio sur la pared norte usa la columna de pared sur y la pared sur no lleva aumento. Esa adaptación no está en el ASHRAE.</p></section>' +
 
   '<section class="sec"><h2>Piso y techo</h2><div class="tiles">' +
-    '<div class="tile"><h3>Piso</h3><div class="grid g2">' + SEL('Tipo de piso', 'floor.tipo', FLOOROPTS, {w:true}) + F('Temp. bajo el piso', 'floor.tBelow', {u:'°C', if:'floor.tipo!=losa'}) +
-        SEL('Sitio (clima)', 'floor.ciudad', CITYOPTS, {w:true, if:'floor.tipo=losa'}) + F('Temp. media anual del aire', 'floor.tMed', {u:'°C', if:'floor.tipo=losa'}) + F('Amplitud anual del aire', 'floor.tAmp', {u:'K', if:'floor.tipo=losa'}) +
-        SEL('Tipo de suelo', 'floor.suelo', SOILOPTS, {w:true, if:'floor.tipo=losa'}) + F('Conductividad del suelo', 'floor.ks', {u:'W/mK', if:'floor.tipo=losa'}) + F('Difusividad del suelo', 'floor.als', {u:'×10⁻⁷ m²/s', if:'floor.tipo=losa'}) +
-        SEL('Aislación de la losa', 'floor.cfg', CFGOPTS, {w:true, if:'floor.tipo=losa'}) + F('Resistencia de la losa', 'floor.Rf', {u:'m²K/W', if:'floor.tipo=losa'}) +
-        F('Largo de aislación parcial', 'floor.c', {u:'m', if:'floor.tipo=losa&floor.cfg!=none&floor.cfg!=uniform'}) + F('Perímetro expuesto (vacío: completo)', 'floor.P', {u:'m', if:'floor.tipo=losa'}) + insul('floor') + '</div><p class="hint" id="floorHint"></p><p class="hint" id="soilHint" hidden></p><p class="calc" id="calc-floor"></p></div>' +
+    '<div class="tile"><h3>Piso</h3><div class="grid g2">' + F('Temp. bajo el piso', 'floor.tBelow', {u:'°C', w:true}) + '</div>' +
+      '<div class="layers"><h3 style="font-size:14px;margin:12px 0 6px">Capas del piso (de adentro hacia abajo)</h3><div id="layerRows"></div><button class="btn quiet" id="btnLayer" type="button">Agregar capa</button>' +
+      '<p class="hint">k del hormigón y los morteros: lista de materiales de la Municipalidad de Rosario (no cita norma). Aislantes: ASHRAE 2010, cap. 24, Tabla 1. El k se puede editar.</p></div>' +
+      '<p class="hint">Temperatura bajo el piso: ingresá el valor de diseño. Para congelados con calefacción bajo piso, el cap. 23 del ASHRAE calcula con 4,4 °C (40 °F) de terreno bajo la aislación.</p><p class="calc" id="calc-floor"></p></div>' +
     '<div class="tile"><h3>Techo</h3><div class="grid g2">' + SEL('Ubicación', 'ceil.tipo', [['ext','Externo'],['int','Interno']]) +
       F('Temp. sobre el techo', 'ceil.tAbove', {u:'°C', if:'ceil.tipo=int'}) + insul('ceil') + sunBlock('ceil', 'ceil.tipo=ext') +
     '</div><p class="calc" id="calc-ceil"></p></div>' +
-  '</div><p class="hint">El ASHRAE 2010 describe, pero no publica completa, la correlación de losa sobre terreno (Chuangchid y Krarti, 2000). Por eso el piso se calcula como una pared (U · A · Δt con la temperatura que se ingrese) o, para cámaras sobre 0 °C, con el método simplificado de Krarti y Chuangchid (1999), que es otra fuente.</p></section>' +
+  '</div><p class="hint">El piso se calcula por capas como una pared: U · A · Δt con la temperatura bajo el piso que se ingrese. El ASHRAE 2010 describe, pero no publica completa, la correlación de losa sobre terreno (Chuangchid y Krarti, 2000).</p></section>' +
 
   '<section class="sec"><h2>Infiltración</h2><div class="grid">' +
     SEL('Método', 'infil.metodo', [['puertas','ASHRAE: por puertas (ec. 11 a 13 y 15)'],['ac','Cambios de aire (dato ingresado)']], {w:true}) +
@@ -605,7 +594,16 @@ function buildForm(){
     }).join('') +
   '</div><p class="hint">Ventiladores e iluminación: se cuenta toda la energía eléctrica disipada dentro de la cámara. Calor por persona: si se deja vacío se usa la ecuación 10 del ASHRAE 2010, 1295 − 11,5t (Btu/h, con t en °F), convertida a W. Con mucho movimiento de personas el manual sugiere multiplicar por 1,25.</p>' +
   '<div class="sub2"><h3>Otras cargas</h3><div id="miscRows"></div><button class="btn quiet" id="btnMisc" type="button">Agregar carga</button></div></section>';
-  renderMisc(); renderDoors();
+  renderMisc(); renderDoors(); renderLayers();
+}
+function renderLayers(){
+  var el = $('layerRows'); if (!el) return;
+  el.innerHTML = S.floor.layers.map(function(l, i){
+    var p = 'floor.layers.' + i;
+    return '<div class="tile" style="margin-bottom:8px"><div class="grid g2">' + SEL('Capa ' + (i + 1), p + '.mat', FLOORMATOPTS, {w:true}) + F('Espesor', p + '.esp', {u:'mm'}) + F('k', p + '.k', {u:'W/mK'}) +
+      '</div><div class="tools"><button class="btn quiet" type="button" data-dellayer="' + i + '" aria-label="Quitar capa ' + (i + 1) + '">Quitar capa</button></div></div>';
+  }).join('');
+  fill(el);
 }
 function renderMisc(){
   $('miscRows').innerHTML = S.misc.map(function(r, i){
@@ -647,18 +645,21 @@ $('form').addEventListener('input', function(e){
     [key, key + 2].forEach(function(i){ S.walls[i].width = v; sync('walls.' + i + '.width'); });
   }
   if (k === 'prod.id') applyProduct(v);
-  if (k === 'floor.ciudad') applyCity(v);
   if (k === 'cond.sitio'){ var cs = CITIES.filter(function(x){ return x[0] === v; })[0]; if (cs && cs[5] != null){ S.cond.tAmb = cs[5]; sync('cond.tAmb'); } }
-  if (k === 'floor.suelo') applySoil(v);
   if (k === 'fans.hp' || k === 'fans.loc') applyMotor();
   var mm = /^(walls\.\d|floor|ceil)\.mat$/.exec(k);
   if (mm && v !== 'otro'){ setp(mm[1] + '.k', matK(v)); sync(mm[1] + '.k'); }
+  var ml = /^(floor\.layers\.\d)\.mat$/.exec(k);
+  if (ml){ var fm = floorMat(v); if (fm){ if (v !== 'otro'){ setp(ml[1] + '.k', fm[2]); sync(ml[1] + '.k'); } setp(ml[1] + '.rol', fm[3]); sync(ml[1] + '.rol'); } }
   update();
 });
 $('form').addEventListener('click', function(e){
   var b = e.target.closest('[data-del]'), d = e.target.closest('[data-deldoor]');
   if (b){ S.misc.splice(+b.dataset.del, 1); renderMisc(); update(); }
   if (d){ S.infil.doors.splice(+d.dataset.deldoor, 1); renderDoors(); update(); }
+  var dl = e.target.closest('[data-dellayer]');
+  if (dl){ S.floor.layers.splice(+dl.dataset.dellayer, 1); renderLayers(); update(); }
+  if (e.target.id === 'btnLayer'){ S.floor.layers.push(newLayer('horm24')); renderLayers(); update(); }
   if (e.target.id === 'btnMisc'){ S.misc.push({desc:'', w:NaN}); renderMisc(); update(); }
   if (e.target.id === 'btnDoor'){ S.infil.doors.push(baseDoor()); renderDoors(); update(); }
   if (e.target.id === 'logoDel'){ LOGO = null; try { localStorage.removeItem('btc_logo'); } catch(_){} showLogo(); }
@@ -715,11 +716,7 @@ function update(){
     $('calc-w' + i).innerHTML = 'A <b>' + f1.format(w.A) + ' m²</b> · U <b>' + f3.format(w.U) + '</b> · Δt <b>' + f1.format(w.dT) + ' K</b>' + (w.dsun ? ' + sol <b>' + f1.format(w.dsun) + ' K</b>' : '') +
       '<br>Transmisión <b>' + f0.format(w.ins) + ' W</b> · Sol <b>' + f0.format(w.sol) + ' W</b> · Total <b>' + f0.format(w.tot) + ' W</b>' + (w.sunMissing ? '<br>' + WARN_SUN : '');
   });
-  if (S.floor.tipo === 'losa'){
-    var L_ = R.floor.losa;
-    $('calc-floor').innerHTML = L_.ok ? ('A <b>' + f1.format(R.floor.A) + ' m²</b> · A/P <b>' + f2.format(R.floor.AP) + ' m</b> · R equivalente <b>' + f2.format(L_.Req) + ' m²K/W</b><br>U efectiva media <b>' + f3.format(L_.Um) + '</b> · de amplitud <b>' + f3.format(L_.Ua) + '</b> W/m²K<br>Media <b>' + f0.format(R.floor.Qm) + ' W</b> + amplitud <b>' + f0.format(R.floor.Qa) + ' W</b><br>Total <b>' + f0.format(R.floor.tot) + ' W</b>' + (L_.warnAP ? '<br>A/P menor a 0,5 m: el método no es preciso.' : '')) : ('Falta un dato: ' + L_.msg);
-  } else
-  $('calc-floor').innerHTML = 'A <b>' + f1.format(R.floor.A) + ' m²</b> · U <b>' + f3.format(R.floor.U) + '</b> · Δt <b>' + f1.format(R.floor.dT) + ' K</b>' + (R.floor.auto ? ' (terreno a 4,4 °C)' : '') + '<br>Total <b>' + f0.format(R.floor.tot) + ' W</b>';
+  $('calc-floor').innerHTML = 'Resistencia de capas <b>' + f2.format(S.floor.layers.reduce(function(a, l){ return a + layerR(l); }, 0)) + ' m²K/W</b><br>A <b>' + f1.format(R.floor.A) + ' m²</b> · U <b>' + f3.format(R.floor.U) + '</b> · Δt <b>' + f1.format(R.floor.dT) + ' K</b>' + '<br>Total <b>' + f0.format(R.floor.tot) + ' W</b>';
   $('calc-ceil').innerHTML = 'A <b>' + f1.format(R.ceil.A) + ' m²</b> · U <b>' + f3.format(R.ceil.U) + '</b> · Δt <b>' + f1.format(R.ceil.dT) + ' K</b>' + (R.ceil.dsun ? ' + sol <b>' + f1.format(R.ceil.dsun) + ' K</b>' : '') +
     '<br>Transmisión <b>' + f0.format(R.ceil.ins) + ' W</b> · Sol <b>' + f0.format(R.ceil.sol) + ' W</b> · Total <b>' + f0.format(R.ceil.tot) + ' W</b>' + (R.ceil.sunMissing ? '<br>' + WARN_SUN : '');
   var I = R.inf;
@@ -735,14 +732,6 @@ function update(){
   $('calc-prod').innerHTML = 'Enfriamiento <b>' + f0.format(R.prod.cool) + ' W</b> · respiración <b>' + f0.format(R.prod.resp) + ' W</b> · total <b>' + f0.format(R.prod.tot) + ' W</b>';
   ['fans', 'lights', 'people'].forEach(function(k){ $('calc-' + k).innerHTML = 'Ganancia <b>' + f0.format(R[k]) + ' W</b>' + (k === 'people' && !(n(S.people.w) > 0) ? ' · ASHRAE <b>' + f0.format(R.peopleW) + ' W</b> por persona' : ''); });
   var pi = $('prodInfo'); if (pi) pi.innerHTML = prodInfoHtml();
-  var fh = $('floorHint'); if (fh) fh.textContent = FLOORHINT[S.floor.tipo] || FLOORHINT.manual;
-  var sh = $('soilHint');
-  if (sh){
-    var ss = SOILS.filter(function(x){ return x[0] === S.floor.suelo; })[0], cc = CITIES.filter(function(x){ return x[0] === S.floor.ciudad; })[0];
-    sh.textContent = (cc ? 'Clima: ' + cc[4] + '. Amplitud calculada como (mes más cálido − mes más frío) / 2 de las medias mensuales. ' : '') + (ss ? 'Rango de la fuente para este suelo: k de ' + f1.format(ss[2]) + ' a ' + f1.format(ss[3]) + ' W/m·K y α de ' + f1.format(ss[4]/86400*1e7) + ' a ' + f1.format(ss[5]/86400*1e7) + ' ×10⁻⁷ m²/s. Se cargó el extremo alto de k, que da más carga: ajustalo según el estudio de suelos. ' : '') + (S.floor.tipo === 'losa' ? 'La resistencia de la losa y el material y espesor de la aislación se ingresan a mano: el libro usa 0,587 m²K/W para 100 mm de hormigón liviano en su ejemplo. Con aislación parcial, la aislación ingresada es la de la franja.' : '');
-    sh.hidden = S.floor.tipo !== 'losa';
-  }
-  var ft = $('f-floor-tBelow'); if (ft) ft.placeholder = S.floor.tipo === 'calef' ? '4,4 (ASHRAE)' : '0';
   var mi = minIns(n(S.cond.tRoom)), mh = $('minInsHint');
   if (mh) mh.textContent = mi ? 'Referencia (cap. 24, Tabla 2): espesor mínimo de poliisocianurato expandido recomendado por la industria para ' + f1.format(n(S.cond.tRoom)) + ' °C: ' + f0.format(mi.n) + ' mm en el norte de EE.UU. y ' + f0.format(mi.s) + ' mm en el sur de EE.UU. El manual aclara que puede requerir más espesor por puentes térmicos. No es una norma argentina.' : 'Referencia (cap. 24, Tabla 2): la tabla del ASHRAE cubre cámaras entre −40 y 16 °C aproximadamente.';
   var pw = $('f-people-w'); if (pw) pw.placeholder = f0.format(R.peopleW) + ' (ASHRAE)';
@@ -781,7 +770,9 @@ $('fileOpen').addEventListener('change', function(e){
       var o = JSON.parse(rd.result), b = newCase();
       ['proj','cond','geo','floor','ceil','infil','prod','fans','lights','people'].forEach(function(k){ Object.assign(b[k], o[k] || {}); });
       if (b.cond.metodo !== 'mult') b.cond.metodo = 'sumado';
-      if (b.floor.tipo === 'terreno') b.floor.tipo = 'manual';
+      b.floor.mode = 'capas';
+      if (!(o.floor && Array.isArray(o.floor.layers))) b.floor.layers = [newLayer('horm24'), newLayer('pur'), newLayer('horm24')];
+      b.floor.layers = b.floor.layers.map(function(l){ return Object.assign(newLayer('horm24'), l, {esp: l.esp == null ? NaN : l.esp, k: l.k == null ? NaN : l.k}); });
       if (Array.isArray(o.walls)) b.walls = b.walls.map(function(w, i){ return Object.assign(w, o.walls[i] || {}); });
       b.infil.doors = (o.infil && Array.isArray(o.infil.doors)) ? o.infil.doors.map(function(d){ return baseDoor(d); }) : [baseDoor()];
       if (Array.isArray(o.misc)) b.misc = o.misc.map(function(r){ return {desc:r.desc || '', w:r.w == null ? NaN : r.w}; });
@@ -897,27 +888,20 @@ function buildPdf(S, R){
   var F_ = S.floor, Ce = S.ceil;
   table(['', 'Piso', 'Techo'], [
     ['Ubicación', '-', Ce.tipo === 'ext' ? 'Externo' : 'Interno'],
-    ['Tipo de piso', (FLOOROPTS.filter(function(x){ return x[0] === F_.tipo; })[0] || FLOOROPTS[0])[1].replace('Congelados con calefacción bajo piso', 'Con calefacción bajo piso').replace('Tubos o ductos ventilados con aire', 'Ventilado con aire'), '-'],
-    [F_.tipo === 'losa' ? 'Temp. media anual del aire' : 'Temperatura del otro lado', f1.format(R.floor.To) + ' °C' + (R.floor.auto ? ' *' : ''), f1.format(R.ceil.To) + ' °C'],
-    [F_.tipo === 'losa' ? 'U efectiva (media)' : 'U', f3.format(R.floor.U) + ' W/m²K', f3.format(R.ceil.U) + ' W/m²K'],
-    ['Aislación', F_.tipo === 'losa' && F_.cfg === 'none' ? 'Sin aislación' : insLabel(F_), insLabel(Ce)],
-    ['Espesor', f0.format(n(F_.esp)) + ' mm', f0.format(n(Ce.esp)) + ' mm'],
+    ['Temperatura del otro lado', f1.format(R.floor.To) + ' °C', f1.format(R.ceil.To) + ' °C'],
+    ['U', f3.format(R.floor.U) + ' W/m²K', f3.format(R.ceil.U) + ' W/m²K'],
+    ['Aislación', F_.mode === 'capas' ? 'Por capas (ver detalle)' : insLabel(F_), insLabel(Ce)],
+    ['Espesor', f0.format(floorThk(F_)) + ' mm', f0.format(n(Ce.esp)) + ' mm'],
     ['Aumento de dif. de temp. por sol', '-', f1.format(R.ceil.dsun) + ' °C'],
     ['Ganancia por transmisión', W(R.floor.tot), W(R.ceil.ins)],
     ['Ganancia solar', '-', W(R.ceil.sol)],
     ['Ganancia total', W(R.floor.tot), W(R.ceil.tot)]
   ], 56, [8]);
-  if (F_.tipo === 'losa' && R.floor.losa && R.floor.losa.ok){
-    var KL = R.floor.losa, cityN = (CITIES.filter(function(x){ return x[0] === F_.ciudad; })[0] || ['', 'ingresado a mano'])[1], soilN = (SOILS.filter(function(x){ return x[0] === F_.suelo; })[0] || ['', 'ingresado a mano'])[1];
-    table(['Losa sobre terreno', 'Dato'], [
-      ['Sitio / suelo', cityN + ' / ' + soilN],
-      ['Amplitud anual del aire', f2.format(R.floor.Tamp) + ' K'],
-      ['k suelo / difusividad', f2.format(n(F_.ks)) + ' W/mK / ' + f2.format(n(F_.als)) + 'e-7 m²/s'],
-      ['A/P (perímetro ' + f1.format(R.floor.P) + ' m)', f2.format(R.floor.AP) + ' m'],
-      ['Resistencia equivalente', f2.format(KL.Req) + ' m²K/W'],
-      ['Parte media anual', W(R.floor.Qm)],
-      ['Parte de amplitud anual', W(R.floor.Qa)]
-    ], 80, []);
+  if (F_.mode === 'capas' && F_.layers.length){
+    table(['Capas del piso (de adentro hacia abajo)', 'Esp. mm', 'k W/mK', 'R m²K/W'], F_.layers.map(function(l, i){
+      var fm = floorMat(l.mat);
+      return [(i + 1) + '. ' + (fm ? fm[1] : 'Capa'), f0.format(n(l.esp)), f2.format(n(l.k)), f3.format(layerR(l))];
+    }), 90, null);
   }
 
   sec('Infiltración');
@@ -975,7 +959,8 @@ function buildPdf(S, R){
     I.method === 'ac' ? 'Infiltración: volumen x cambios de aire / 24, por diferencia de entalpía entre el aire exterior y el de la cámara. Los cambios de aire son un dato ingresado.' : 'Infiltración por puertas: ecuaciones 11 a 13 y 15 del ASHRAE 2010 (flujo pleno de Gosney y Olama, tiempo abierto, factor de flujo y efectividad del protector).',
     'El efecto solar usa la Tabla 3 del ASHRAE. En el hemisferio sur la pared norte toma la columna de pared sur: adaptación que no figura en el ASHRAE.',
     S.people.w > 0 ? 'Calor por persona: valor ingresado.' : 'Calor por persona: ecuación 10 del ASHRAE 2010, 1295 - 11,5t (Btu/h, t en °F), convertida a W.',
-    F_.tipo === 'losa' ? 'Piso: losa sobre terreno por el método simplificado de Krarti y Chuangchid (1999), publicado en el libro Energy Audit of Building Systems (Krarti), ecuaciones 6.35 a 6.37 y Tabla 6.5. No es el paper de 2000 que cita el ASHRAE y no contempla calefacción bajo piso. Clima: normales mensuales 1991-2020 del SMN (según tablas de Wikipedia que lo citan; Batán, Miramar y Canals usan estaciones cercanas). Suelo: ASHRAE (2000) según la tabla reproducida en Geothermal Energy. Es una estimación.' : 'Piso: calculado como una pared (U x A x dt). El ASHRAE 2010 no publica la correlación de losa sobre terreno completa.' + (R.floor.auto ? ' * Piso con calefacción: terreno a 4,4 °C (40 °F) bajo la aislación, según el cap. 23.' : ''),
+    'Piso: calculado como una pared por capas (U x A x dt) con la temperatura bajo el piso ingresada. El ASHRAE 2010 no publica la correlación de losa sobre terreno completa.',
+    F_.mode === 'capas' ? 'Capas del piso: k del hormigón y los morteros de la lista de materiales de la Municipalidad de Rosario (sin norma citada); aislantes de ASHRAE 2010, cap. 24, Tabla 1.' : '',
     'Los nombres de productos en español son traducción propia de los nombres del manual.'
   ];
   notes.filter(Boolean).forEach(function(t){ var ls = doc.splitTextToSize(t, CW); ls.forEach(function(l){ need(5); txt(l, M, y); y += 3.8; }); y += 1; });
