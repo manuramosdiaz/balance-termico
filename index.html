@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Balance Térmico de Cámaras</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%227%22 fill=%22%230B6BA8%22/%3E%3Cpath d=%22M3.0 16.0L29.0 16.0M23.5 16.0L26.5 19.0M23.5 16.0L26.5 13.0M8.5 16.0L5.5 13.0M8.5 16.0L5.5 19.0M9.5 4.7L22.5 27.3M19.8 22.5L18.7 26.6M19.8 22.5L23.8 23.6M12.2 9.5L13.3 5.4M12.2 9.5L8.2 8.4M22.5 4.7L9.5 27.3M12.3 22.5L8.2 23.6M12.3 22.5L13.3 26.6M19.8 9.5L23.8 8.4M19.8 9.5L18.7 5.4%22 fill=%22none%22 stroke=%22%23fff%22 stroke-width=%222%22 stroke-linecap=%22round%22 transform=%22translate%284 4%29 scale%28.75%29%22/%3E%3C/svg%3E">
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
 <style>
@@ -34,6 +35,7 @@
 body{background:var(--bg);color:var(--ink);font-family:var(--body);font-size:14px;line-height:1.45}
 .page{max-width:1320px;margin:0 auto;padding-block:22px 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
 .top{display:flex;flex-wrap:wrap;gap:10px 24px;align-items:flex-end;justify-content:space-between;margin-bottom:20px}
+.mark{color:var(--accent);display:inline-flex;vertical-align:-.12em;margin-right:.35em}.mark svg{width:.95em;height:.95em}
 h1{font-family:var(--display);font-weight:700;font-size:clamp(28px,4vw,40px);line-height:1.05;margin:0;letter-spacing:.2px;text-wrap:balance}
 .sub{margin:6px 0 0;color:var(--muted);max-width:62ch}
 .badge{font-size:12px;padding:5px 10px;border-radius:999px;background:var(--accent-soft);color:var(--ink);border:1px solid var(--line)}
@@ -109,7 +111,7 @@ summary{cursor:pointer;color:var(--accent);font-size:13px;width:max-content}
 <main class="page">
   <header class="top">
     <div>
-      <h1>Balance térmico de cámaras</h1>
+      <h1><span class="mark"><svg class="snow" viewBox="0 0 32 32" width="38" height="38" aria-hidden="true" focusable="false"><path d="M3.0 16.0L29.0 16.0M23.5 16.0L26.5 19.0M23.5 16.0L26.5 13.0M8.5 16.0L5.5 13.0M8.5 16.0L5.5 19.0M9.5 4.7L22.5 27.3M19.8 22.5L18.7 26.6M19.8 22.5L23.8 23.6M12.2 9.5L13.3 5.4M12.2 9.5L8.2 8.4M22.5 4.7L9.5 27.3M12.3 22.5L8.2 23.6M12.3 22.5L13.3 26.6M19.8 9.5L23.8 8.4M19.8 9.5L18.7 5.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span>Balance térmico de cámaras</h1>
       <p class="sub">Cargas por transmisión, infiltración, producto, equipos y personas. Resultado en W, kW, kcal/h y TR, con informe en PDF.</p>
     </div>
     <div class="badge" id="caseBadge" role="status" hidden></div>
@@ -805,9 +807,22 @@ function buildPdf(S, R){
   var M = 15, CW = 180, y = 0;
   var INK = [15,30,43], MUT = [88,105,118], ACC = [11,107,168], LN = [201,213,221];
   var txt = function(s, x, yy, o){ doc.text(String(s), x, yy, o || {}); };
+  function flake(cx, cy, r){
+    doc.setDrawColor.apply(doc, ACC); doc.setLineWidth(0.45);
+    [0, 60, 120].forEach(function(a){
+      var t = a*Math.PI/180, co = Math.cos(t), si = Math.sin(t);
+      doc.line(cx - r*co, cy - r*si, cx + r*co, cy + r*si);
+      [1, -1].forEach(function(sg){ [45, -45].forEach(function(da){
+        var u = t + (sg === 1 ? 0 : Math.PI) + da*Math.PI/180, bx = cx + sg*0.58*r*co, by = cy + sg*0.58*r*si;
+        doc.line(bx, by, bx + 0.32*r*Math.cos(u), by + 0.32*r*Math.sin(u));
+      }); });
+    });
+  }
   function head(){
     var x = M;
+
     if (LOGO){ var h = 12, w = Math.min(42, h*LOGO.w/LOGO.h); doc.addImage(LOGO.data, 'PNG', M, 9, w, w*LOGO.h/LOGO.w > h ? h : w*LOGO.h/LOGO.w); x = M + w + 4; }
+    else { flake(M + 6, 15, 5.5); x = M + 15; }
     if (S.proj.empresa){ doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.setTextColor.apply(doc, INK); txt(S.proj.empresa, x, 15); }
     doc.setFont('helvetica','bold'); doc.setFontSize(14); doc.setTextColor.apply(doc, ACC); txt('Balance térmico de cámara', M + CW, 14, {align:'right'});
     doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor.apply(doc, MUT); txt('Informe completo · ' + longDate(), M + CW, 19.5, {align:'right'});
