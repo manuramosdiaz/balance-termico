@@ -161,21 +161,127 @@ function hum(t, rh){ const r = Math.min(Math.max(rh, 0), 1); const p = r*pws(t);
 function enth(t, w){ return 1.006*t + w*(2501 + 1.86*t); }
 function spv(t, w){ return 0.287042*(t + 273.15)*(1 + 1.607858*w)/101.325; }
 
-// Datos de tablas. Fuente: ASHRAE Handbook—Refrigeration, capítulo "Refrigeration Load", ed. 2002 (SI).
-// Tabla 1: conductividad térmica de aislantes de cámaras, W/(m·K), envejecidos 180 días, temperatura media 24 °C.
+// Datos de tablas. Fuente: ASHRAE Handbook—Refrigeration 2010, cap. 19 "Thermal Properties of Foods", cap. 23 y cap. 24 "Refrigerated-Facility Loads".
+// El manual está en unidades inglesas: se convierte con los factores de abajo.
+const BTU_LB_F = 4.1868;    // Btu/(lb·°F) a kJ/(kg·K)
+const BTU_LB = 2.326;       // Btu/lb a kJ/kg
+const BTU_H = 0.29307107;   // Btu/h a W
+const K_BTUIN = 0.1441314;  // Btu·in/(h·ft²·°F) a W/(m·K)
+const F2K = 1/1.8;          // diferencia de °F a K
+const RESP_K = 1.05506/907.18474; // Btu/(día·ton corta) a kJ/(kg·día), con ton = 2000 lb
+// Cap. 24, Tabla 1: conductividad térmica de aislantes, Btu·in/(h·ft²·°F), media de 75 °F, envejecidos 180 días.
 const INSUL = [
-  ['pur', 'Poliuretano (rango 0,023 a 0,026)', 0.026],
-  ['pir', 'Poliisocianurato', 0.027],
-  ['xps', 'Poliestireno extruido', 0.035],
-  ['eps', 'Poliestireno expandido', 0.037],
-  ['corcho', 'Corcho en placas', 0.043],
-  ['vidrio', 'Vidrio celular', 0.044],
+  ['pur', 'Poliuretano (0,16 a 0,18 Btu·in/h·ft²·°F)', 0.18*K_BTUIN],
+  ['pir', 'Poliisocianurato', 0.19*K_BTUIN],
+  ['xps', 'Poliestireno extruido', 0.24*K_BTUIN],
+  ['eps', 'Poliestireno expandido', 0.26*K_BTUIN],
+  ['corcho', 'Corcho en placas', 0.30*K_BTUIN],
+  ['vidrio', 'Vidrio celular', 0.31*K_BTUIN],
   ['otro', 'Otro (k manual)', 0.04]
+].map(m => [m[0], m[1], Math.round(m[2]*1000)/1000]);
+// Cap. 24, Tabla 3: aumento del Δt por efecto del sol, en °F en el manual, convertido a K. Pared este, sur, oeste y techo plano.
+const SUN = {
+  oscura:{E:8*F2K, S:5*F2K, O:8*F2K, techo:20*F2K},
+  media:{E:6*F2K, S:4*F2K, O:6*F2K, techo:15*F2K},
+  clara:{E:4*F2K, S:2*F2K, O:4*F2K, techo:9*F2K}
+};
+// Cap. 24, ecuación 10: calor por persona qp = 1295 − 11,5·t (Btu/h, t en °F). Devuelve W con t en °C.
+const peopleHeat = (t) => Math.max(0, (1295 - 11.5*(1.8*t + 32))*BTU_H);
+// Cap. 24, Tabla 2: espesor mínimo de poliisocianurato expandido, in. [desde °F, hasta °F, norte EE.UU., sur EE.UU.]
+const MININS = [[50,60,2,2],[40,50,2,2],[25,40,2,3],[15,25,3,3],[0,15,3,4],[-15,0,4,4],[-40,-15,5,5]];
+function minIns(tC){
+  const tF = 1.8*tC + 32; let a = null;
+  MININS.forEach(r => { if (tF >= r[0] && tF <= r[1]) a = a ? [Math.max(a[0], r[2]), Math.max(a[1], r[3])] : [r[2], r[3]]; });
+  return a ? {n: a[0]*25.4, s: a[1]*25.4} : null;
+}
+// Cap. 24, Tabla 6: calor de motores eléctricos, Btu/h, por potencia nominal en hp.
+// A: motor y equipo accionado dentro del espacio. B: motor fuera, equipo dentro. C: motor dentro, equipo fuera.
+const MOTORS = [[0.05,360,130,240],[0.08,580,200,380],[0.125,900,320,590],[0.16,1160,400,760],[0.25,1180,640,540],[0.33,1500,840,660],[0.5,2120,1270,850],
+  [0.75,2650,1900,740],[1,3390,2550,850],[1.5,4960,3820,1140],[2,6440,5090,1350],[3,9430,7640,1790],[5,15500,12700,2790],[7.5,22700,19100,3640],
+  [10,29900,24500,4490],[15,44400,38200,6210],[20,58500,50900,7610],[25,72300,63600,8680],[30,85700,76300,9440],[40,114000,102000,12600],
+  [50,143000,127000,15700],[60,172000,153000,18900],[75,212000,191000,21200],[100,283000,255000,28300],[125,353000,318000,35300],
+  [150,420000,382000,37800],[200,569000,509000,50300],[250,699000,636000,62900]];
+// Cap. 19, Tabla 3 (propiedades, °F y Btu/lb) y Tabla 9 (respiración, Btu/día por ton corta, a 32, 41, 50 y 59 °F; [mín, máx]).
+// Cap. 41, Tabla 2 para el pan. Campos: id, nombre, categoría, agua %, punto de congelación °F, c sobre cong., c bajo cong., calor latente, respiración.
+var PROD = [{"id":"artichokes_globe","es":"Alcauciles","cat":"Verduras","xw":84.94,"tf":29.8,"a":0.93,"b":0.48,"L":122.0,"r":null,"src":"t3"},{"id":"artichokes_jerusalem","es":"Topinambur (alcaucil de Jerusalén)","cat":"Verduras","xw":78.01,"tf":27.5,"a":0.87,"b":0.54,"L":112.0,"r":null,"src":"t3"},{"id":"asparagus","es":"Espárragos","cat":"Verduras","xw":92.4,"tf":30.9,"a":0.96,"b":0.43,"L":133.0,"r":{"n":"","v":[[6015,17651],[12032,30043],[23630,67146],[35086,72152]]},"src":"t3"},{"id":"beans_snap","es":"Chauchas (porotos verdes)","cat":"Verduras","xw":90.27,"tf":30.7,"a":0.95,"b":0.44,"L":130.0,"r":{"n":"","v":[null,[7529,7709],[12032,12824],[18731,20533]]},"src":"t3"},{"id":"beans_lima","es":"Porotos de Lima","cat":"Verduras","xw":70.24,"tf":30.9,"a":0.84,"b":0.49,"L":101.0,"r":{"n":"sin vaina","v":[[2306,6628],[4323,7925],null,[22046,27449]]},"src":"t3"},{"id":"beets","es":"Remolacha","cat":"Verduras","xw":87.58,"tf":30.0,"a":0.93,"b":0.46,"L":126.0,"r":{"n":"raíces rojas","v":[[1189,1585],[2017,2089],[2594,2990],[3711,5115]]},"src":"t3"},{"id":"broccoli","es":"Brócoli","cat":"Verduras","xw":90.69,"tf":30.9,"a":0.96,"b":0.43,"L":130.0,"r":{"n":"brotes","v":[[4107,4719],[7601,35226],null,[38256,74890]]},"src":"t3"},{"id":"brussels_sprouts","es":"Coles de Bruselas","cat":"Verduras","xw":86.0,"tf":30.6,"a":0.93,"b":0.46,"L":123.0,"r":{"n":"","v":[[3386,5295],[7096,10698],[13904,18623],[21037,23523]]},"src":"t3"},{"id":"cabbage","es":"Repollo","cat":"Verduras","xw":92.15,"tf":30.4,"a":0.96,"b":0.44,"L":132.0,"r":{"n":"blanco de invierno","v":[[1081,1801],[1621,3062],[2702,3962],[4323,5944]]},"src":"t3"},{"id":"carrots","es":"Zanahorias","cat":"Verduras","xw":87.79,"tf":29.5,"a":0.94,"b":0.48,"L":126.0,"r":{"n":"Imperator, Texas","v":[[3386,3386],[4323,4323],[6916,6916],[8718,8718]]},"src":"t3"},{"id":"cauliflower","es":"Coliflor","cat":"Verduras","xw":91.91,"tf":30.6,"a":0.96,"b":0.44,"L":132.0,"r":{"n":"Texas","v":[[3926,3926],[4503,4503],[7456,7456],[10158,10158]]},"src":"t3"},{"id":"celeriac","es":"Apio-nabo","cat":"Verduras","xw":88.0,"tf":30.4,"a":0.93,"b":0.45,"L":126.0,"r":null,"src":"t3"},{"id":"celery","es":"Apio","cat":"Verduras","xw":94.64,"tf":31.1,"a":0.97,"b":0.42,"L":136.0,"r":{"n":"New York, blanco","v":[[1585,1585],[2413,2413],null,[8215,8215]]},"src":"t3"},{"id":"collards","es":"Berzas (col rizada)","cat":"Verduras","xw":90.55,"tf":30.6,"a":0.96,"b":0.44,"L":130.0,"r":null,"src":"t3"},{"id":"corn_sweet_yellow","es":"Choclo (maíz dulce amarillo)","cat":"Verduras","xw":75.96,"tf":30.9,"a":0.86,"b":0.47,"L":109.0,"r":{"n":"con chala, Texas","v":[[9366,9366],[17111,17111],[24676,24676],[35878,35878]]},"src":"t3"},{"id":"cucumbers","es":"Pepinos","cat":"Verduras","xw":96.01,"tf":31.1,"a":0.98,"b":0.41,"L":138.0,"r":{"n":"California","v":[null,null,[5079,6376],[5295,7313]]},"src":"t3"},{"id":"eggplant","es":"Berenjenas","cat":"Verduras","xw":92.03,"tf":30.6,"a":0.96,"b":0.44,"L":132.0,"r":null,"src":"t3"},{"id":"endive","es":"Endibia","cat":"Verduras","xw":93.79,"tf":31.8,"a":0.97,"b":0.4,"L":135.0,"r":null,"src":"t3"},{"id":"garlic","es":"Ajo","cat":"Verduras","xw":58.58,"tf":30.6,"a":0.76,"b":0.52,"L":84.0,"r":{"n":"","v":[[648,2413],[1296,2125],[2017,2125],[2413,6015]]},"src":"t3"},{"id":"ginger_root","es":"Jengibre (raíz)","cat":"Verduras","xw":81.67,"tf":null,"a":0.9,"b":0.46,"L":117.0,"r":null,"src":"t3"},{"id":"horseradish","es":"Rábano picante","cat":"Verduras","xw":78.66,"tf":28.8,"a":0.88,"b":0.51,"L":113.0,"r":{"n":"","v":[[1801,1801],[2377,2377],[5800,5800],[7204,7204]]},"src":"t3"},{"id":"kale","es":"Kale","cat":"Verduras","xw":84.46,"tf":31.1,"a":0.91,"b":0.44,"L":121.0,"r":null,"src":"t3"},{"id":"kohlrabi","es":"Colinabo","cat":"Verduras","xw":91.0,"tf":30.2,"a":0.96,"b":0.45,"L":131.0,"r":{"n":"","v":[[2197,2197],[3602,3602],[6916,6916],[10807,10807]]},"src":"t3"},{"id":"leeks","es":"Puerros","cat":"Verduras","xw":83.0,"tf":30.7,"a":0.9,"b":0.46,"L":119.0,"r":{"n":"","v":[[2089,3062],[4323,6412],[11815,15021],[18227,25756]]},"src":"t3"},{"id":"lettuce_iceberg","es":"Lechuga americana (iceberg)","cat":"Verduras","xw":95.89,"tf":31.6,"a":0.98,"b":0.39,"L":138.0,"r":{"n":"cabeza, California","v":[[2017,3711],[2918,4395],[6015,8826],[8501,9006]]},"src":"t3"},{"id":"mushrooms","es":"Hongos (champiñones)","cat":"Verduras","xw":91.81,"tf":30.4,"a":0.95,"b":0.44,"L":132.0,"r":{"n":"","v":[[6196,9618],[15634,15634],null,null]},"src":"t3"},{"id":"okra","es":"Okra","cat":"Verduras","xw":89.58,"tf":28.8,"a":0.95,"b":0.49,"L":129.0,"r":null,"src":"t3"},{"id":"onions","es":"Cebollas","cat":"Verduras","xw":89.68,"tf":30.4,"a":0.94,"b":0.45,"L":129.0,"r":{"n":"secas, Autumn Spice","v":[[505,684],[793,1477],null,[2089,5548]]},"src":"t3"},{"id":"parsley","es":"Perejil","cat":"Verduras","xw":87.71,"tf":30.0,"a":0.94,"b":0.46,"L":126.0,"r":{"n":"","v":[[7277,10140],[14549,18738],[28879,36155],[31746,49163]]},"src":"t3"},{"id":"parsnips","es":"Chirivías","cat":"Verduras","xw":79.53,"tf":30.4,"a":0.89,"b":0.48,"L":114.0,"r":null,"src":"t3"},{"id":"peas_green","es":"Arvejas verdes","cat":"Verduras","xw":78.86,"tf":30.9,"a":0.9,"b":0.47,"L":113.0,"r":{"n":"en vaina","v":[[6700,10302],[12139,16822],null,[39372,44595]]},"src":"t3"},{"id":"peppers_sweet_green","es":"Pimientos verdes dulces","cat":"Verduras","xw":92.19,"tf":30.7,"a":0.96,"b":0.43,"L":132.0,"r":{"n":"","v":[null,null,[3170,3170],[5043,5043]]},"src":"t3"},{"id":"potatoes_main_crop","es":"Papas (cosecha principal)","cat":"Verduras","xw":78.96,"tf":30.9,"a":0.88,"b":0.46,"L":113.0,"r":{"n":"California blanca, maduras","v":[null,[1296,1513],[1467,2197],[1467,2594]]},"src":"t3"},{"id":"potatoes_sweet","es":"Batatas","cat":"Verduras","xw":72.84,"tf":29.7,"a":0.83,"b":0.5,"L":104.0,"r":null,"src":"t3"},{"id":"pumpkins","es":"Zapallos","cat":"Verduras","xw":91.6,"tf":30.6,"a":0.95,"b":0.43,"L":132.0,"r":null,"src":"t3"},{"id":"radishes","es":"Rabanitos","cat":"Verduras","xw":94.84,"tf":30.7,"a":0.97,"b":0.42,"L":136.0,"r":{"n":"sin hojas","v":[[1189,1296],[1693,1801],[3314,3494],[6124,7204]]},"src":"t3"},{"id":"rhubarb","es":"Ruibarbo","cat":"Verduras","xw":93.61,"tf":30.4,"a":0.97,"b":0.44,"L":135.0,"r":null,"src":"t3"},{"id":"rutabaga","es":"Rutabaga (nabo sueco)","cat":"Verduras","xw":89.66,"tf":30.0,"a":0.94,"b":0.46,"L":129.0,"r":null,"src":"t3"},{"id":"salsify_vegetable_oyster","es":"Salsifí","cat":"Verduras","xw":77.0,"tf":30.0,"a":0.87,"b":0.49,"L":110.0,"r":null,"src":"t3"},{"id":"spinach","es":"Espinaca","cat":"Verduras","xw":91.58,"tf":31.5,"a":0.96,"b":0.42,"L":132.0,"r":null,"src":"t3"},{"id":"squash_summer","es":"Zapallito (de verano)","cat":"Verduras","xw":94.2,"tf":31.1,"a":0.97,"b":0.42,"L":135.0,"r":{"n":"amarillo","v":[null,null,[7709,8105],[16534,20028]]},"src":"t3"},{"id":"squash_winter","es":"Zapallo (de invierno)","cat":"Verduras","xw":87.78,"tf":30.6,"a":0.93,"b":0.45,"L":126.0,"r":null,"src":"t3"},{"id":"tomatoes_mature_green","es":"Tomates verdes maduros","cat":"Verduras","xw":93.0,"tf":30.9,"a":0.96,"b":0.42,"L":134.0,"r":{"n":"Texas","v":[null,null,null,[4503,4503]]},"src":"t3"},{"id":"tomatoes_ripe","es":"Tomates maduros","cat":"Verduras","xw":93.76,"tf":31.1,"a":0.97,"b":0.43,"L":135.0,"r":null,"src":"t3"},{"id":"turnip","es":"Nabo","cat":"Verduras","xw":91.87,"tf":30.0,"a":0.96,"b":0.45,"L":132.0,"r":null,"src":"t3"},{"id":"turnip_greens","es":"Hojas de nabo","cat":"Verduras","xw":91.07,"tf":31.6,"a":0.96,"b":0.42,"L":131.0,"r":null,"src":"t3"},{"id":"watercress","es":"Berro","cat":"Verduras","xw":95.11,"tf":31.5,"a":0.97,"b":0.4,"L":137.0,"r":null,"src":"t3"},{"id":"yams","es":"Ñame","cat":"Verduras","xw":69.6,"tf":null,"a":0.83,"b":0.49,"L":100.0,"r":null,"src":"t3"},{"id":"apples_fresh","es":"Manzanas frescas","cat":"Frutas","xw":83.93,"tf":30.0,"a":0.91,"b":0.47,"L":120.0,"r":{"n":"promedio de muchos cultivares","v":[[505,901],[1117,1585],null,[2990,6808]]},"src":"t3"},{"id":"apples_dried","es":"Manzanas secas","cat":"Frutas","xw":31.76,"tf":null,"a":0.61,"b":0.68,"L":46.0,"r":null,"src":"t3"},{"id":"apricots","es":"Damascos","cat":"Frutas","xw":86.35,"tf":30.0,"a":0.92,"b":0.47,"L":124.0,"r":{"n":"","v":[[1153,1261],[1405,1982],[2449,4143],[4683,7565]]},"src":"t3"},{"id":"avocados","es":"Paltas","cat":"Frutas","xw":74.27,"tf":31.5,"a":0.88,"b":0.47,"L":107.0,"r":{"n":"","v":[null,null,null,[13616,34581]]},"src":"t3"},{"id":"bananas","es":"Bananas","cat":"Frutas","xw":74.26,"tf":30.6,"a":0.85,"b":0.48,"L":107.0,"r":{"n":"verdes","v":[null,null,null,[4431,7626]]},"src":"t3"},{"id":"blackberries","es":"Moras","cat":"Frutas","xw":85.64,"tf":30.6,"a":0.93,"b":0.46,"L":123.0,"r":{"n":"","v":[[3458,5043],[6304,10086],[11527,20893],[15489,32060]]},"src":"t3"},{"id":"blueberries","es":"Arándanos","cat":"Frutas","xw":84.61,"tf":29.1,"a":0.91,"b":0.49,"L":122.0,"r":{"n":"","v":[[505,2306],[2017,2702],null,[7529,13616]]},"src":"t3"},{"id":"cantaloupes","es":"Melones (cantaloupe)","cat":"Frutas","xw":89.78,"tf":29.8,"a":0.94,"b":0.46,"L":129.0,"r":{"n":"","v":[null,[1909,2197],[3423,3423],[7420,8501]]},"src":"t3"},{"id":"cherries_sour","es":"Cerezas ácidas","cat":"Frutas","xw":86.13,"tf":28.9,"a":0.92,"b":0.49,"L":124.0,"r":{"n":"","v":[[296,2918],[2810,2918],null,[6015,11022]]},"src":"t3"},{"id":"cherries_sweet","es":"Cerezas dulces","cat":"Frutas","xw":80.76,"tf":28.8,"a":0.89,"b":0.51,"L":116.0,"r":{"n":"","v":[[901,1189],[2089,3098],null,[5512,9907]]},"src":"t3"},{"id":"cranberries","es":"Arándanos rojos (cranberries)","cat":"Frutas","xw":86.54,"tf":30.4,"a":0.93,"b":0.46,"L":124.0,"r":null,"src":"t3"},{"id":"currants_european_black","es":"Grosellas negras europeas","cat":"Frutas","xw":81.96,"tf":30.2,"a":0.89,"b":0.47,"L":118.0,"r":null,"src":"t3"},{"id":"currants_red_and_white","es":"Grosellas rojas y blancas","cat":"Frutas","xw":83.95,"tf":30.2,"a":0.92,"b":0.47,"L":120.0,"r":null,"src":"t3"},{"id":"dates_cured","es":"Dátiles curados","cat":"Frutas","xw":22.5,"tf":3.7,"a":0.55,"b":0.55,"L":32.0,"r":null,"src":"t3"},{"id":"figs_fresh","es":"Higos frescos","cat":"Frutas","xw":79.11,"tf":27.7,"a":0.88,"b":0.54,"L":113.0,"r":{"n":"Mission","v":[null,[2413,2918],[4863,5079],[10807,13940]]},"src":"t3"},{"id":"figs_dried","es":"Higos secos","cat":"Frutas","xw":28.43,"tf":null,"a":0.6,"b":0.98,"L":41.0,"r":null,"src":"t3"},{"id":"gooseberries","es":"Grosellas espinosas","cat":"Frutas","xw":87.87,"tf":30.0,"a":0.94,"b":0.47,"L":126.0,"r":null,"src":"t3"},{"id":"grapefruit","es":"Pomelos","cat":"Frutas","xw":90.89,"tf":30.0,"a":0.95,"b":0.45,"L":131.0,"r":{"n":"California Marsh","v":[null,null,null,[2594,2594]]},"src":"t3"},{"id":"grapes_american","es":"Uvas americanas","cat":"Frutas","xw":81.3,"tf":29.1,"a":0.89,"b":0.49,"L":117.0,"r":{"n":"Labrusca, Concord","v":[[612,612],[1189,1189],null,[3494,3494]]},"src":"t3"},{"id":"grapes_european_type","es":"Uvas europeas","cat":"Frutas","xw":80.56,"tf":28.2,"a":0.88,"b":0.52,"L":116.0,"r":{"n":"Vinifera, Emperor","v":[[288,505],[684,1296],[1801,1801],[2197,2594]]},"src":"t3"},{"id":"lemons","es":"Limones","cat":"Frutas","xw":87.4,"tf":29.5,"a":0.94,"b":0.48,"L":126.0,"r":{"n":"California Eureka","v":[null,null,null,[3494,3494]]},"src":"t3"},{"id":"limes","es":"Limas","cat":"Frutas","xw":88.26,"tf":29.1,"a":0.94,"b":0.48,"L":127.0,"r":{"n":"Persian","v":[null,null,[576,1261],[1296,2306]]},"src":"t3"},{"id":"mangos","es":"Mangos","cat":"Frutas","xw":81.71,"tf":30.4,"a":0.89,"b":0.47,"L":117.0,"r":{"n":"","v":[null,null,null,[9907,9907]]},"src":"t3"},{"id":"melons_casaba","es":"Melones casaba","cat":"Frutas","xw":92.0,"tf":30.0,"a":0.95,"b":0.45,"L":132.0,"r":null,"src":"t3"},{"id":"melons_honeydew","es":"Melones honeydew","cat":"Frutas","xw":89.66,"tf":30.4,"a":0.94,"b":0.44,"L":129.0,"r":{"n":"","v":[null,null,[1765,1765],[2594,3494]]},"src":"t3"},{"id":"melons_watermelon","es":"Sandías","cat":"Frutas","xw":91.51,"tf":31.3,"a":0.95,"b":0.42,"L":132.0,"r":{"n":"","v":[null,null,[1657,1657],null]},"src":"t3"},{"id":"nectarines","es":"Nectarinas","cat":"Frutas","xw":86.28,"tf":30.4,"a":0.92,"b":0.45,"L":124.0,"r":null,"src":"t3"},{"id":"olives","es":"Aceitunas","cat":"Frutas","xw":79.99,"tf":29.5,"a":0.9,"b":0.49,"L":115.0,"r":null,"src":"t3"},{"id":"oranges","es":"Naranjas","cat":"Frutas","xw":82.3,"tf":30.6,"a":0.91,"b":0.47,"L":118.0,"r":{"n":"Florida","v":[[684,684],[1405,1405],[2702,2702],[4611,4611]]},"src":"t3"},{"id":"peaches_fresh","es":"Duraznos frescos","cat":"Frutas","xw":87.66,"tf":30.4,"a":0.93,"b":0.45,"L":126.0,"r":{"n":"Elberta","v":[[829,829],[1441,1441],[3458,3458],[7565,7565]]},"src":"t3"},{"id":"peaches_dried","es":"Duraznos secos","cat":"Frutas","xw":31.8,"tf":null,"a":0.61,"b":0.83,"L":46.0,"r":null,"src":"t3"},{"id":"pears","es":"Peras","cat":"Frutas","xw":83.81,"tf":29.1,"a":0.91,"b":0.49,"L":120.0,"r":{"n":"Bartlett","v":[[684,1513],[1117,2197],null,[3314,13220]]},"src":"t3"},{"id":"persimmons","es":"Caquis","cat":"Frutas","xw":64.4,"tf":28.0,"a":0.78,"b":0.55,"L":92.0,"r":{"n":"","v":[null,[1296,1296],null,[2594,3098]]},"src":"t3"},{"id":"pineapples","es":"Ananás","cat":"Frutas","xw":86.5,"tf":30.2,"a":0.92,"b":0.46,"L":124.0,"r":{"n":"maduros verdes","v":[null,null,[1225,1225],[2846,2846]]},"src":"t3"},{"id":"plums","es":"Ciruelas","cat":"Frutas","xw":85.2,"tf":30.6,"a":0.91,"b":0.45,"L":123.0,"r":{"n":"Wickson","v":[[432,648],[865,1982],[1981,2522],[2630,2737]]},"src":"t3"},{"id":"pomegranates","es":"Granadas","cat":"Frutas","xw":80.97,"tf":26.6,"a":0.88,"b":0.55,"L":116.0,"r":null,"src":"t3"},{"id":"prunes_dried","es":"Ciruelas secas (pasas de ciruela)","cat":"Frutas","xw":32.39,"tf":null,"a":0.61,"b":0.84,"L":46.0,"r":null,"src":"t3"},{"id":"quinces","es":"Membrillos","cat":"Frutas","xw":83.8,"tf":28.4,"a":0.91,"b":0.51,"L":120.0,"r":null,"src":"t3"},{"id":"raisins_seedless","es":"Pasas de uva sin semilla","cat":"Frutas","xw":15.42,"tf":null,"a":0.49,"b":0.49,"L":22.0,"r":null,"src":"t3"},{"id":"raspberries","es":"Frambuesas","cat":"Frutas","xw":86.57,"tf":30.9,"a":0.95,"b":0.46,"L":124.0,"r":{"n":"","v":[[3890,5512],[6808,8501],[6124,12248],[18119,22334]]},"src":"t3"},{"id":"strawberries","es":"Frutillas","cat":"Frutas","xw":91.57,"tf":30.6,"a":0.96,"b":0.44,"L":132.0,"r":{"n":"","v":[[2702,3890],[3602,7313],[10807,20893],[15634,20317]]},"src":"t3"},{"id":"tangerines","es":"Mandarinas","cat":"Frutas","xw":87.6,"tf":30.0,"a":0.93,"b":0.46,"L":126.0,"r":null,"src":"t3"},{"id":"cod","es":"Bacalao","cat":"Pescados","xw":81.22,"tf":28.0,"a":0.9,"b":0.51,"L":117.0,"r":null,"src":"t3"},{"id":"haddock","es":"Eglefino","cat":"Pescados","xw":79.92,"tf":28.0,"a":0.9,"b":0.51,"L":115.0,"r":null,"src":"t3"},{"id":"halibut","es":"Halibut (fletán)","cat":"Pescados","xw":77.92,"tf":28.0,"a":0.89,"b":0.52,"L":112.0,"r":null,"src":"t3"},{"id":"herring_kippered","es":"Arenque ahumado","cat":"Pescados","xw":59.7,"tf":28.0,"a":0.78,"b":0.54,"L":86.0,"r":null,"src":"t3"},{"id":"mackerel_atlantic","es":"Caballa del Atlántico","cat":"Pescados","xw":63.55,"tf":28.0,"a":0.8,"b":0.53,"L":91.0,"r":null,"src":"t3"},{"id":"perch","es":"Perca","cat":"Pescados","xw":78.7,"tf":28.0,"a":0.89,"b":0.51,"L":113.0,"r":null,"src":"t3"},{"id":"pollock_atlantic","es":"Abadejo del Atlántico","cat":"Pescados","xw":78.18,"tf":28.0,"a":0.88,"b":0.51,"L":112.0,"r":null,"src":"t3"},{"id":"salmon_pink","es":"Salmón rosado","cat":"Pescados","xw":76.35,"tf":28.0,"a":0.88,"b":0.52,"L":110.0,"r":null,"src":"t3"},{"id":"tuna_bluefin","es":"Atún de aleta azul","cat":"Pescados","xw":68.09,"tf":28.0,"a":0.82,"b":0.52,"L":98.0,"r":null,"src":"t3"},{"id":"whiting","es":"Merlán (whiting)","cat":"Pescados","xw":80.27,"tf":28.0,"a":0.9,"b":0.51,"L":115.0,"r":null,"src":"t3"},{"id":"clams","es":"Almejas","cat":"Mariscos","xw":81.82,"tf":28.0,"a":0.9,"b":0.51,"L":117.0,"r":null,"src":"t3"},{"id":"lobster_american","es":"Langosta americana","cat":"Mariscos","xw":76.76,"tf":28.0,"a":0.87,"b":0.51,"L":110.0,"r":null,"src":"t3"},{"id":"oysters","es":"Ostras","cat":"Mariscos","xw":85.16,"tf":28.0,"a":0.91,"b":0.51,"L":122.0,"r":null,"src":"t3"},{"id":"scallop_meat","es":"Vieiras (carne)","cat":"Mariscos","xw":78.57,"tf":28.0,"a":0.89,"b":0.51,"L":113.0,"r":null,"src":"t3"},{"id":"shrimp","es":"Camarones","cat":"Mariscos","xw":75.86,"tf":28.0,"a":0.87,"b":0.52,"L":109.0,"r":null,"src":"t3"},{"id":"brisket","es":"Vacuno: brisket (pecho)","cat":"Carne vacuna","xw":55.18,"tf":null,"a":0.76,"b":0.56,"L":79.0,"r":null,"src":"t3"},{"id":"carcass_choice","es":"Vacuno: media res, choice","cat":"Carne vacuna","xw":57.26,"tf":28.0,"a":0.77,"b":0.55,"L":82.0,"r":null,"src":"t3"},{"id":"beef_carcass_select","es":"Vacuno: media res, select","cat":"Carne vacuna","xw":58.21,"tf":28.9,"a":0.78,"b":0.54,"L":83.0,"r":null,"src":"t3"},{"id":"liver","es":"Vacuno: hígado","cat":"Carne vacuna","xw":68.99,"tf":28.9,"a":0.83,"b":0.52,"L":99.0,"r":null,"src":"t3"},{"id":"ribs_whole_ribs_6_12","es":"Vacuno: costillar entero (costillas 6-12)","cat":"Carne vacuna","xw":54.54,"tf":null,"a":0.75,"b":0.55,"L":78.0,"r":null,"src":"t3"},{"id":"beef_round_full_cut_lean_and_fat","es":"Vacuno: round entero, con grasa","cat":"Carne vacuna","xw":64.75,"tf":null,"a":0.81,"b":0.52,"L":93.0,"r":null,"src":"t3"},{"id":"beef_round_full_cut_lean","es":"Vacuno: round entero, magro","cat":"Carne vacuna","xw":70.83,"tf":null,"a":0.84,"b":0.51,"L":102.0,"r":null,"src":"t3"},{"id":"sirloin_lean","es":"Vacuno: sirloin, magro","cat":"Carne vacuna","xw":71.7,"tf":28.9,"a":0.84,"b":0.5,"L":103.0,"r":null,"src":"t3"},{"id":"short_loin_porterhouse_steak_lean","es":"Vacuno: porterhouse, magro","cat":"Carne vacuna","xw":69.59,"tf":null,"a":0.83,"b":0.51,"L":100.0,"r":null,"src":"t3"},{"id":"t_bone_steak_lean","es":"Vacuno: T-bone, magro","cat":"Carne vacuna","xw":69.71,"tf":null,"a":0.83,"b":0.51,"L":100.0,"r":null,"src":"t3"},{"id":"tenderloin_lean","es":"Vacuno: lomo (tenderloin), magro","cat":"Carne vacuna","xw":68.4,"tf":null,"a":0.82,"b":0.51,"L":98.0,"r":null,"src":"t3"},{"id":"veal_lean","es":"Ternera, magra","cat":"Carne vacuna","xw":75.91,"tf":null,"a":0.87,"b":0.5,"L":109.0,"r":null,"src":"t3"},{"id":"pork_backfat","es":"Cerdo: grasa dorsal (backfat)","cat":"Cerdo","xw":7.69,"tf":null,"a":0.52,"b":0.71,"L":11.0,"r":null,"src":"t3"},{"id":"pork_bacon","es":"Cerdo: panceta (bacon)","cat":"Cerdo","xw":31.58,"tf":null,"a":0.64,"b":0.64,"L":45.0,"r":null,"src":"t3"},{"id":"pork_belly","es":"Cerdo: panza (belly)","cat":"Cerdo","xw":36.74,"tf":null,"a":0.67,"b":0.8,"L":53.0,"r":null,"src":"t3"},{"id":"pork_carcass","es":"Cerdo: media res","cat":"Cerdo","xw":49.83,"tf":null,"a":0.74,"b":0.74,"L":71.0,"r":null,"src":"t3"},{"id":"pork_ham_cured_whole_lean","es":"Cerdo: jamón curado entero, magro","cat":"Cerdo","xw":68.26,"tf":null,"a":0.83,"b":0.53,"L":98.0,"r":null,"src":"t3"},{"id":"ham_country_cured_lean","es":"Cerdo: jamón crudo curado, magro","cat":"Cerdo","xw":55.93,"tf":null,"a":0.75,"b":0.55,"L":80.0,"r":null,"src":"t3"},{"id":"pork_shoulder_whole_lean","es":"Cerdo: paleta entera, magra","cat":"Cerdo","xw":72.63,"tf":28.0,"a":0.86,"b":0.53,"L":104.0,"r":null,"src":"t3"},{"id":"sausage_braunschweiger","es":"Embutido: Braunschweiger","cat":"Cerdo","xw":48.01,"tf":null,"a":0.72,"b":0.57,"L":69.0,"r":null,"src":"t3"},{"id":"sausage_frankfurter","es":"Embutido: Frankfurt","cat":"Cerdo","xw":53.87,"tf":28.9,"a":0.75,"b":0.55,"L":77.0,"r":null,"src":"t3"},{"id":"sausage_italian","es":"Embutido: italiano","cat":"Cerdo","xw":51.08,"tf":null,"a":0.74,"b":0.57,"L":74.0,"r":null,"src":"t3"},{"id":"sausage_polish","es":"Embutido: polaco","cat":"Cerdo","xw":53.15,"tf":null,"a":0.75,"b":0.56,"L":77.0,"r":null,"src":"t3"},{"id":"sausage_pork","es":"Embutido: de cerdo","cat":"Cerdo","xw":44.52,"tf":null,"a":0.7,"b":0.58,"L":64.0,"r":null,"src":"t3"},{"id":"sausage_smoked_links","es":"Embutido: ahumado (links)","cat":"Cerdo","xw":39.3,"tf":null,"a":0.67,"b":0.59,"L":56.0,"r":null,"src":"t3"},{"id":"chicken","es":"Pollo","cat":"Aves","xw":65.99,"tf":27.0,"a":0.79,"b":0.42,"L":95.0,"r":null,"src":"t3"},{"id":"duck","es":"Pato","cat":"Aves","xw":48.5,"tf":null,"a":0.73,"b":0.59,"L":70.0,"r":null,"src":"t3"},{"id":"turkey","es":"Pavo","cat":"Aves","xw":70.4,"tf":null,"a":0.84,"b":0.54,"L":101.0,"r":null,"src":"t3"},{"id":"egg_white","es":"Huevo: clara","cat":"Huevos","xw":87.81,"tf":30.9,"a":0.93,"b":0.43,"L":126.0,"r":null,"src":"t3"},{"id":"egg_white_dried","es":"Huevo: clara deshidratada","cat":"Huevos","xw":14.62,"tf":null,"a":0.55,"b":0.5,"L":21.0,"r":null,"src":"t3"},{"id":"egg_whole","es":"Huevo entero","cat":"Huevos","xw":75.33,"tf":30.9,"a":0.87,"b":0.47,"L":108.0,"r":null,"src":"t3"},{"id":"egg_whole_dried","es":"Huevo entero deshidratado","cat":"Huevos","xw":3.1,"tf":null,"a":0.49,"b":0.48,"L":4.0,"r":null,"src":"t3"},{"id":"egg_yolk","es":"Huevo: yema","cat":"Huevos","xw":48.81,"tf":30.9,"a":0.73,"b":0.54,"L":70.0,"r":null,"src":"t3"},{"id":"egg_yolk_salted","es":"Huevo: yema salada","cat":"Huevos","xw":50.8,"tf":1.0,"a":0.72,"b":0.91,"L":73.0,"r":null,"src":"t3"},{"id":"egg_yolk_sugared","es":"Huevo: yema azucarada","cat":"Huevos","xw":51.25,"tf":25.0,"a":0.73,"b":0.61,"L":74.0,"r":null,"src":"t3"},{"id":"lamb_composite_of_cuts_lean","es":"Cordero: cortes mixtos, magro","cat":"Cordero","xw":73.42,"tf":28.6,"a":0.86,"b":0.51,"L":105.0,"r":null,"src":"t3"},{"id":"lamb_leg_whole_lean","es":"Cordero: pierna entera, magra","cat":"Cordero","xw":74.11,"tf":null,"a":0.86,"b":0.51,"L":107.0,"r":null,"src":"t3"},{"id":"butter","es":"Manteca","cat":"Lácteos","xw":17.94,"tf":null,"a":0.57,"b":0.63,"L":26.0,"r":null,"src":"t3"},{"id":"cheese_camembert","es":"Queso Camembert","cat":"Lácteos","xw":51.8,"tf":null,"a":0.74,"b":0.8,"L":74.0,"r":null,"src":"t3"},{"id":"cheese_cheddar","es":"Queso Cheddar","cat":"Lácteos","xw":36.75,"tf":8.8,"a":0.66,"b":0.73,"L":53.0,"r":null,"src":"t3"},{"id":"cheese_cottage_uncreamed","es":"Queso cottage (sin crema)","cat":"Lácteos","xw":79.77,"tf":29.8,"a":0.89,"b":0.48,"L":114.0,"r":null,"src":"t3"},{"id":"cheese_cream","es":"Queso crema","cat":"Lácteos","xw":53.75,"tf":null,"a":0.75,"b":0.7,"L":77.0,"r":null,"src":"t3"},{"id":"cheese_gouda","es":"Queso Gouda","cat":"Lácteos","xw":41.46,"tf":null,"a":0.69,"b":0.66,"L":59.0,"r":null,"src":"t3"},{"id":"cheese_limburger","es":"Queso Limburger","cat":"Lácteos","xw":48.42,"tf":18.7,"a":0.72,"b":0.67,"L":70.0,"r":null,"src":"t3"},{"id":"cheese_mozzarella","es":"Queso Mozzarella","cat":"Lácteos","xw":54.14,"tf":null,"a":0.75,"b":0.59,"L":78.0,"r":null,"src":"t3"},{"id":"cheese_parmesan_hard","es":"Queso Parmesano duro","cat":"Lácteos","xw":29.16,"tf":null,"a":0.62,"b":0.7,"L":42.0,"r":null,"src":"t3"},{"id":"cheese_processed_american","es":"Queso procesado americano","cat":"Lácteos","xw":39.16,"tf":19.6,"a":0.67,"b":0.66,"L":56.0,"r":null,"src":"t3"},{"id":"cheese_roquefort","es":"Queso Roquefort","cat":"Lácteos","xw":39.38,"tf":2.7,"a":0.67,"b":0.8,"L":57.0,"r":null,"src":"t3"},{"id":"cheese_swiss","es":"Queso suizo","cat":"Lácteos","xw":37.21,"tf":14.0,"a":0.66,"b":0.69,"L":53.0,"r":null,"src":"t3"},{"id":"cream_half_and_half","es":"Crema half and half","cat":"Lácteos","xw":80.57,"tf":null,"a":0.89,"b":0.52,"L":116.0,"r":null,"src":"t3"},{"id":"cream_table","es":"Crema de mesa","cat":"Lácteos","xw":73.75,"tf":28.0,"a":0.86,"b":0.53,"L":106.0,"r":null,"src":"t3"},{"id":"cream_heavy_whipping","es":"Crema para batir (heavy whipping)","cat":"Lácteos","xw":57.71,"tf":null,"a":0.78,"b":0.55,"L":83.0,"r":null,"src":"t3"},{"id":"ice_cream_chocolate","es":"Helado de chocolate","cat":"Lácteos","xw":55.7,"tf":21.9,"a":0.74,"b":0.66,"L":80.0,"r":null,"src":"t3"},{"id":"ice_cream_strawberry","es":"Helado de frutilla","cat":"Lácteos","xw":60.0,"tf":21.9,"a":0.76,"b":0.65,"L":86.0,"r":null,"src":"t3"},{"id":"ice_cream_vanilla","es":"Helado de vainilla","cat":"Lácteos","xw":61.0,"tf":21.9,"a":0.77,"b":0.65,"L":88.0,"r":null,"src":"t3"},{"id":"milk_evaporated","es":"Leche evaporada","cat":"Lácteos","xw":74.04,"tf":29.5,"a":0.85,"b":0.5,"L":106.0,"r":null,"src":"t3"},{"id":"milk_skim","es":"Leche descremada","cat":"Lácteos","xw":90.8,"tf":null,"a":0.94,"b":0.43,"L":130.0,"r":null,"src":"t3"},{"id":"milk_whole","es":"Leche entera","cat":"Lácteos","xw":87.69,"tf":30.9,"a":0.93,"b":0.43,"L":126.0,"r":null,"src":"t3"},{"id":"yeast_baker_s_compressed","es":"Levadura de panadería (comprimida)","cat":"Otros","xw":69.0,"tf":null,"a":0.85,"b":0.52,"L":100.0,"r":null,"src":"t3"},{"id":"pan_horneado","es":"Pan horneado","cat":"Panificados","xw":null,"tf":18.0,"a":0.7,"b":0.34,"L":46.9,"r":null,"src":"c41","note":"Cap. 41, Tabla 2: calor específico 0,70 y 0,34 Btu/lb·°F, calor latente 46,90 Btu/lb. El pan congela entre 16 y 20 °F: se carga el punto medio, 18 °F."},{"id":"kiwi","es":"Kiwi","cat":"Frutas","xw":null,"tf":null,"a":null,"b":null,"L":null,"r":{"n":"Kiwifruit","v":[[616,616],[1455,1455],[2889,2889],null]},"src":"t9","note":"El kiwi no está en la Tabla 3 del cap. 19: solo se carga su respiración (Tabla 9). Calores específicos y latente quedan manuales."}];
+
+const RESP_COLS = [32, 41, 50, 59];
+// Respiración de una fruta u hortaliza a la temperatura de cámara: columna de la Tabla 9 más cercana (hasta 5 °F de diferencia).
+function respDb(id, tRoomC, mode){
+  const p = PROD.filter(x => x.id === id)[0]; if (!p || !p.r) return null;
+  const tF = 1.8*tRoomC + 32; let best = -1, bd = 1e9;
+  RESP_COLS.forEach((c, i) => { if (p.r.v[i] && Math.abs(tF - c) < bd){ bd = Math.abs(tF - c); best = i; } });
+  if (best < 0 || bd > 5) return {kj: 0, col: null, none: true};
+  const v = p.r.v[best];
+  return {kj: (mode === 'max' ? v[1] : v[0])*RESP_K, col: RESP_COLS[best], lo: v[0]*RESP_K, hi: v[1]*RESP_K, none: false};
+}
+// Propiedades del producto en unidades SI a partir de un registro de PROD.
+function prodProps(p){
+  const r2 = (x, d) => Math.round(x*Math.pow(10, d))/Math.pow(10, d);
+  return {
+    shA: p.a != null ? r2(p.a*BTU_LB_F, 3) : null, shB: p.b != null ? r2(p.b*BTU_LB_F, 3) : null, lat: p.L != null ? r2(p.L*BTU_LB, 1) : null,
+    tFr: p.a != null ? r2(((p.tf != null ? p.tf : 28) - 32)*F2K, 1) : null, tfDefault: p.a != null && p.tf == null
+  };
+}
+// Clima por sitio: temperatura media anual del aire y amplitud anual (semirango de las medias mensuales), °C.
+// Fuente de las medias mensuales: normales 1991-2020 del Servicio Meteorológico Nacional (SMN) según las tablas de climas de Wikipedia que lo citan,
+// salvo donde se indica otra estación. [id, nombre, media, amplitud, nota, temp. de diseño de verano o null, estación de la temp. de diseño]
+// Temp. de diseño de verano: TDMX de la Tabla A.2 de IRAM 11603 (borrador 'Esquema 1', 2011): percentil 99 de las máximas diarias de diciembre a marzo.
+const CITIES = [
+  ['mdp','Mar del Plata',13.95,6.40,'Estación Mar del Plata, SMN 1991-2020',35.6,'Mar del Plata (AERO)'],
+  ['batan','Batán',13.95,6.40,'Sin datos propios: se usa Mar del Plata (proxy)',35.6,'Mar del Plata (AERO), proxy'],
+  ['miramar','Miramar',13.95,6.40,'Sin datos propios: se usa Mar del Plata (proxy)',35.6,'Mar del Plata (AERO), proxy'],
+  ['balcarce','Balcarce',13.89,6.65,'Estación Balcarce, SMN/INTA 1991-2020',null,''],
+  ['roca_inta','General Roca (INTA 1990-2004)',15.47,8.75,'Estación experimental INTA Alto Valle, 1990-2004',null,''],
+  ['roca_dpa','General Roca (Dpto. Prov. de Aguas 1997-2011)',14.24,8.75,'Departamento Provincial de Aguas, 1997-2011',null,''],
+  ['madryn','Puerto Madryn',13.56,6.30,'Aeródromo; el período de las medias no está indicado en la fuente',null,''],
+  ['bsas','Buenos Aires (Observatorio Central)',18.08,6.95,'Observatorio Central, SMN 1991-2020',36.5,'Buenos Aires (estación de la ciudad)'],
+  ['cba_obs','Córdoba (Observatorio)',18.38,6.95,'Observatorio Córdoba, SMN 1991-2020',38.2,'Córdoba (OBS.)'],
+  ['cba_aero','Córdoba (Aeropuerto)',17.26,6.85,'Aeropuerto Taravella, SMN 1991-2020',36.6,'Córdoba (AERO)'],
+  ['sanluis','San Luis',17.61,7.60,'Aeropuerto San Luis, SMN 1991-2020',37.6,'San Luis (AERO)'],
+  ['vmercedes','Villa Mercedes',15.38,7.60,'Villa Mercedes INTA, 1981-2010',37.6,'San Luis (AERO), proxy ~90 km'],
+  ['canals','Canals',16.96,7.15,'Sin estación propia: se usa Marcos Juárez Aero, SMN 1991-2020 (proxy, ~110 km)',null,'']
 ];
-// Tabla 3: aumento del Δt por efecto del sol, en K. Columnas del ASHRAE: pared este, pared sur, pared oeste, techo plano.
-const SUN = { oscura:{E:5, S:3, O:5, techo:11}, media:{E:4, S:3, O:4, techo:9}, clara:{E:3, S:2, O:3, techo:5} };
-// Tabla 5 / ecuación 9: calor equivalente por persona, W, con t = temperatura del espacio en °C.
-const peopleHeat = (t) => Math.max(0, 272 - 6*t);
+// Suelos: ASHRAE (2000) según la tabla reproducida en Geothermal Energy (Springer). [id, nombre, k mín, k máx (W/m·K), α mín, α máx (m²/día)]
+const SOILS = [
+  ['arc_p15','Arcilla pesada, 15 % de agua',1.4,1.9,0.042,0.061],
+  ['arc_p5','Arcilla pesada, 5 % de agua',1.0,1.4,0.047,0.061],
+  ['arc_l15','Arcilla liviana, 15 % de agua',0.7,1.0,0.047,0.055],
+  ['arc_l5','Arcilla liviana, 5 % de agua',0.5,0.9,0.056,0.056],
+  ['are_p15','Arena pesada, 15 % de agua',2.8,3.8,0.084,0.11],
+  ['are_p5','Arena pesada, 5 % de agua',2.1,2.3,0.093,0.14],
+  ['are_l15','Arena liviana, 15 % de agua',1.0,2.1,0.047,0.093],
+  ['are_l5','Arena liviana, 5 % de agua',0.9,1.9,0.055,0.12]
+];
+// Losa sobre terreno: método simplificado de Krarti y Chuangchid (1999), Ec. 6.35 a 6.37 y Tabla 6.5 del libro de Krarti
+// "Energy Audit of Building Systems". Transcripto del texto del libro y verificado con sus tres ejemplos resueltos.
+// cfg: 'none' o 'uniform' (aislación uniforme), 'partH' (parcial horizontal), 'partV' (parcial vertical).
+// Devuelve coeficientes efectivos de la media (Um) y de la amplitud (Ua), W/m²K. Con T en °C: q = Um·(Tmedia − Tr) + Ua·Tamplitud, W/m².
+const SLAB_COEF = {uniform:{m:0.40, a:0.25}, none:{m:0.40, a:0.25}, partH:{m:0.34, a:0.20}, partV:{m:0.28, a:0.13}};
+const OMEGA = 1.992e-7; // rad/s, frecuencia anual
+function slabKrarti(p){
+  const co = SLAB_COEF[p.cfg] || SLAB_COEF.none, part = p.cfg === 'partH' || p.cfg === 'partV';
+  const Ri = p.cfg === 'none' ? 0 : p.Ri;
+  const bad = (msg) => ({ok: false, msg: msg});
+  if (!(p.AP > 0)) return bad('Falta el largo y el ancho de la cámara.');
+  if (!(p.ks > 0) || !(p.als > 0)) return bad('Falta la conductividad y la difusividad del suelo.');
+  let Req;
+  if (part){
+    if (!(p.Rf > 0)) return bad('Con aislación parcial hace falta la resistencia de la losa.');
+    const q = (p.c/p.AP)*(Ri/(Ri + p.Rf)); if (!(q < 1)) return bad('El largo de aislación parcial es demasiado grande para esta geometría.');
+    Req = p.Rf/(1 - q);
+  } else Req = p.Rf + Ri;
+  if (!(Req > 0)) return bad('Falta la resistencia de la losa o de la aislación.');
+  const H = p.AP/(p.ks*Req), D = Math.log((1 + H)*Math.pow(1 + 1/H, H));
+  const Uo = p.ks/p.AP, G = p.ks*Req*Math.sqrt(OMEGA/p.als);
+  return {ok: true, Req, H, D, G, Uo, Um: co.m*Uo*D, Ua: co.a*Uo*Math.pow(D, 0.16)*Math.pow(G, -0.6), warnAP: p.AP <= 0.5};
+}
+// Cap. 24, ecuaciones 12 y 13 (en SI): carga con flujo pleno por una puerta, kW. A m², dh kJ/kg, densidades kg/m³, H m.
+function doorFlow(A, H, dh, rI, rR){
+  if (!(dh > 0 && rR > rI && A > 0)) return 0;
+  const Fm = Math.pow(2/(1 + Math.pow(rR/rI, 1/3)), 1.5);
+  return 0.221*A*dh*rR*Math.sqrt(1 - rI/rR)*Math.sqrt(9.81*H)*Fm;
+}
 
 function sunAllow(s, hemi, roof){
   if (s.sunSurf === 'manual') return n(s.dTsol);
@@ -208,8 +314,17 @@ function calc(S){
     return {A, U, To, dT, ins, dsun, sunMissing: sunOn && !w.sunSurf, sol, tot: ins + sol};
   });
   const wallsTot = walls.reduce((a, w) => a + w.tot, 0);
-  const fU = Ue(S.floor), fTo = n(S.floor.tBelow), fdT = fTo - Tr;
-  const floor = {A: area, U: fU, To: fTo, dT: fdT, tot: area*fU*fdT};
+  // Cap. 23: con calefacción bajo piso la carga se calcula con 40 °F de terreno bajo la aislación. Solo se usa si no se ingresó temperatura.
+  const fSet = Number.isFinite(S.floor.tBelow), fAuto = !fSet && S.floor.tipo === 'calef';
+  const fU = Ue(S.floor), fTo = fAuto ? (40 - 32)*F2K : n(S.floor.tBelow), fdT = fTo - Tr;
+  let floor = {A: area, U: fU, To: fTo, dT: fdT, tot: area*fU*fdT, auto: fAuto};
+  if (S.floor.tipo === 'losa'){
+    const P = n(S.floor.P) > 0 ? n(S.floor.P) : 2*(L + Wd), Ri = fU > 0 ? 1/fU : 0;
+    const k = slabKrarti({cfg: S.floor.cfg, AP: P > 0 ? area/P : 0, ks: n(S.floor.ks), als: n(S.floor.als)*1e-7, Rf: n(S.floor.Rf), Ri: Ri, c: n(S.floor.c)});
+    const Tm = n(S.floor.tMed), Tamp = n(S.floor.tAmp);
+    floor = {A: area, U: k.ok ? k.Um : 0, To: Tm, dT: Tm - Tr, tot: k.ok ? area*(k.Um*(Tm - Tr) + k.Ua*Tamp) : 0, auto: false, losa: k, P: P, AP: P > 0 ? area/P : 0, Ri: Ri, Tamp: Tamp,
+      Qm: k.ok ? area*k.Um*(Tm - Tr) : 0, Qa: k.ok ? area*k.Ua*Tamp : 0};
+  }
   const cU = Ue(S.ceil), cTo = S.ceil.tipo === 'ext' ? Ta : n(S.ceil.tAbove), cdT = cTo - Tr;
   const cSunOn = S.ceil.tipo === 'ext' && !!S.ceil.sol, cDsun = cSunOn ? sunAllow(S.ceil, hemi, true) : 0;
   const cIns = area*cU*cdT, cSol = area*cU*cDsun;
@@ -228,16 +343,15 @@ function calc(S){
     const rI = 1/vA, rR = 1/vR, td = n(S.infil.td) > 0 ? n(S.infil.td) : 24;
     inf.doors = (S.infil.doors || []).map(d => {
       const hd = n(d.h), A = n(d.w)*hd;
-      let q = 0;
-      if (dh > 0 && rR > rI && A > 0){
-        const Fm = Math.pow(2/(1 + Math.pow(rR/rI, 1/3)), 1.5);
-        q = 0.221*A*dh*rR*Math.sqrt(1 - rI/rR)*Math.sqrt(9.81*hd)*Fm;
-      }
+      const q = doorFlow(A, hd, dh, rI, rR);
       const Dt = Math.min(1, (n(d.P)*n(d.tp) + 60*n(d.to))/(3600*td));
       const Dfauto = Math.abs(Ta - Tr) < 11 ? 1.1 : 0.8, Df = n(d.df) > 0 ? n(d.df) : Dfauto;
       const E = Math.min(1, Math.max(0, n(d.E)));
       const qt = q*Dt*Df*(1 - E);
-      return {A, q, Dt, Df, Dfauto, E, Qw: qt*1000, moist: dh > 0 ? qt/dh*(wA - wR)*3600 : 0};
+      // Cap. 24, ecuación 16: infiltración por flujo directo (presión negativa o paso continuo). q = V·A·ρr·Δh·Dt, en kW con V en m/s.
+      let qd = 0, Ad = 0;
+      if (d.fd){ Ad = n(d.Ad) > 0 ? n(d.Ad) : A; qd = dh > 0 ? n(d.V)*Ad*rR*dh*Math.min(1, Math.max(0, n(d.dd))) : 0; }
+      return {A, q, Dt, Df, Dfauto, E, Qw: (qt + qd)*1000, Qd: qd*1000, Ad, moist: dh > 0 ? (qt + qd)/dh*(wA - wR)*3600 : 0};
     });
     inf.Q = inf.doors.reduce((a, d) => a + d.Qw, 0); inf.moist = inf.doors.reduce((a, d) => a + d.moist, 0);
   }
@@ -250,8 +364,11 @@ function calc(S){
   else kJ = m*(n(p.shA)*(Ti - Tf) + n(p.lat) + n(p.shB)*(Tf - To));
   const sev = n(p.sev) > 0 ? n(p.sev) : 1;
   const cool = Math.max(0, kJ*sev*1000/(t*3600));
-  const resp = n(p.stored)*n(p.resp)*1000/(24*3600);
-  const prod = {kJ, cool, resp, tot: cool + resp, t};
+  const rd = (p.respMode === 'min' || p.respMode === 'max') ? respDb(p.id, Tr, p.respMode) : null;
+  const useDb = (p.respMode === 'min' || p.respMode === 'max');
+  const respKJ = useDb ? (rd ? rd.kj : 0) : n(p.resp);
+  const resp = n(p.stored)*respKJ*1000/(24*3600);
+  const prod = {kJ, cool, resp, respKJ, respInfo: rd, tot: cool + resp, t};
 
   const eq = (o, w) => n(o.n)*w*n(o.h)/24;
   const peopleW = n(S.people.w) > 0 ? n(S.people.w) : peopleHeat(Tr);
@@ -266,24 +383,24 @@ function calc(S){
   const G = parts.reduce((a, x) => a + x[1], 0);
   const cont = G*n(c.cont)/100;
   const hrs = (n(c.horas) > 0 && n(c.horas) <= 24) ? n(c.horas) : 24;
-  const run = c.metodo === 'coolcalc' ? G*(24/hrs - 1) : (G + cont)*(24/hrs - 1);
+  const run = c.metodo === 'sumado' ? G*(24/hrs - 1) : (G + cont)*(24/hrs - 1);
   const total = G + cont + run;
   return {area, vol, volGeo, volInt, walls, wallsTot, floor, ceil, inf, prod, fans, lights, people, peopleW, miscOther, misc, parts, G, cont, hrs, run, total, hemi};
 }
 
 function baseWall(o){ return Object.assign({orient:'N', tipo:'ext', tAdj:NaN, width:NaN, mode:'U', U:NaN, mat:'pur', k:0.026, esp:NaN, sol:false, sunSurf:'', dTsol:NaN}, o || {}); }
-function baseDoor(o){ return Object.assign({w:NaN, h:NaN, P:NaN, tp:NaN, to:NaN, E:NaN, df:NaN}, o || {}); }
+function baseDoor(o){ return Object.assign({w:NaN, h:NaN, P:NaN, tp:NaN, to:NaN, E:NaN, df:NaN, fd:false, V:NaN, Ad:NaN, dd:NaN}, o || {}); }
 function newCase(){
   return {
     proj:{empresa:'', cliente:'', proyecto:'', sitio:'', sala:'', calculo:''},
-    cond:{tAmb:NaN, rhAmb:NaN, tRoom:NaN, rhRoom:NaN, horas:NaN, cont:NaN, metodo:'mult', hemi:'sur', rsi:0, rse:0},
+    cond:{sitio:'', tAmb:NaN, rhAmb:NaN, tRoom:NaN, rhRoom:NaN, horas:NaN, cont:NaN, metodo:'mult', hemi:'sur', rsi:0, rse:0},
     geo:{L:NaN, W:NaN, H:NaN, vol:NaN},
     walls:[baseWall({orient:'N'}), baseWall({orient:'E'}), baseWall({orient:'S'}), baseWall({orient:'O'})],
-    floor:{tBelow:NaN, mode:'U', U:NaN, mat:'pur', k:0.026, esp:NaN},
+    floor:{tipo:'manual', tBelow:NaN, mode:'U', U:NaN, mat:'pur', k:0.026, esp:NaN, ciudad:'', tMed:NaN, tAmp:NaN, suelo:'', ks:NaN, als:NaN, cfg:'none', Rf:NaN, c:NaN, P:NaN},
     ceil:{tipo:'ext', tAbove:NaN, mode:'U', U:NaN, mat:'pur', k:0.026, esp:NaN, sol:false, sunSurf:'', dTsol:NaN},
     infil:{metodo:'puertas', td:24, ac:NaN, doors:[baseDoor()]},
-    prod:{name:'', mass:NaN, tIn:NaN, tOut:NaN, hrs:24, tFr:NaN, shA:NaN, shB:NaN, lat:NaN, resp:NaN, stored:NaN, sev:1},
-    fans:{n:NaN, w:NaN, h:24}, lights:{n:NaN, w:NaN, h:24}, people:{n:NaN, w:NaN, h:24},
+    prod:{id:'', respMode:'manual', name:'', mass:NaN, tIn:NaN, tOut:NaN, hrs:24, tFr:NaN, shA:NaN, shB:NaN, lat:NaN, resp:NaN, stored:NaN, sev:1},
+    fans:{n:NaN, w:NaN, h:24, hp:'', loc:'A'}, lights:{n:NaN, w:NaN, h:24}, people:{n:NaN, w:NaN, h:24},
     misc:[]
   };
 }
@@ -329,6 +446,75 @@ function sunBlock(p, extraIf){
     SEL('Tipo de superficie', p + '.sunSurf', SUNOPTS, {if:base + p + '.sol=true', w:true}) +
     F('Aumento de Δt por sol', p + '.dTsol', {u:'K', if:base + p + '.sol=true&' + p + '.sunSurf=manual'});
 }
+var CAT_ORDER = ['Frutas','Carne vacuna','Cerdo','Cordero','Aves','Pescados','Mariscos','Panificados','Lácteos','Huevos','Verduras','Otros'];
+function prodSelect(){
+  var o = '<option value="">Manual (sin base de datos)</option>';
+  CAT_ORDER.forEach(function(c){
+    var l = PROD.filter(function(p){ return p.cat === c; }).sort(function(a, b){ return a.es.localeCompare(b.es, 'es'); });
+    if (l.length) o += '<optgroup label="' + E(c) + '">' + l.map(function(p){ return '<option value="' + p.id + '">' + E(p.es) + '</option>'; }).join('') + '</optgroup>';
+  });
+  return '<label class="f wide"><span class="lb">Producto de la base de datos ASHRAE (' + PROD.length + ')</span><span class="in"><select id="f-prod-id" data-k="prod.id">' + o + '</select></span></label>';
+}
+var FLOOROPTS = [['manual','Temperatura ingresada'],['losa','Losa sobre terreno (cámaras sobre 0 °C)'],['calef','Congelados con calefacción bajo piso'],['ventilado','Tubos o ductos ventilados con aire'],['local','Sobre local o sótano']];
+var FLOORHINT = {
+  manual: 'Ingresá la temperatura bajo la aislación del piso.',
+  losa: 'Método simplificado de Krarti y Chuangchid (1999): carga de la losa como media anual más amplitud anual, con el aire exterior del sitio. No es el paper de 2000 que cita el ASHRAE. No contempla calefacción bajo piso: no sirve para congelados. Es una estimación.',
+  calef: 'Con calefacción bajo piso (aire o glicol por ductos o caños, o resistencias), el cap. 23 calcula la pérdida con 4,4 °C (40 °F) de terreno bajo la aislación. Si dejás vacía la temperatura se usa ese valor.',
+  ventilado: 'El cap. 23 admite tubos bajo el piso ventilados con aire ambiente en climas cálidos para evitar el levantamiento por congelamiento. La temperatura bajo la aislación depende del diseño: ingresala.',
+  local: 'Ingresá la temperatura del local o sótano que está debajo.'
+};
+var CITYOPTS = [['','Elegir o ingresar a mano…']].concat(CITIES.map(function(c){ return [c[0], c[1]]; }));
+var SOILOPTS = [['','Elegir o ingresar a mano…']].concat(SOILS.map(function(s){ return [s[0], s[1]]; }));
+var DESOPTS = [['','Elegir o ingresar a mano…']].concat(CITIES.filter(function(c){ return c[5] != null; }).map(function(c){ return [c[0], c[1] + ' (' + String(c[5]).replace('.', ',') + ' °C)']; }));
+var CFGOPTS = [['none','Sin aislación bajo la losa'],['uniform','Aislación uniforme (toda la losa)'],['partH','Aislación parcial horizontal (perímetro)'],['partV','Aislación parcial vertical (borde)']];
+function applyCity(id){
+  var c = CITIES.filter(function(x){ return x[0] === id; })[0]; if (!c) return;
+  S.floor.tMed = c[2]; S.floor.tAmp = c[3]; sync('floor.tMed'); sync('floor.tAmp');
+}
+function applySoil(id){
+  var s = SOILS.filter(function(x){ return x[0] === id; })[0]; if (!s) return;
+  S.floor.ks = s[3]; S.floor.als = Math.round(s[5]/86400*1e9)/100; sync('floor.ks'); sync('floor.als');
+}
+var HPOPTS = [['','Elegir…']].concat(MOTORS.map(function(r){ return [String(r[0]), String(r[0]).replace('.', ',') + ' hp']; }));
+var LOCOPTS = [['A','Motor y equipo dentro de la cámara'],['B','Motor fuera, equipo dentro'],['C','Motor dentro, equipo fuera']];
+function motorPick(){
+  return SEL('Motor nominal (Tabla 6)', 'fans.hp', HPOPTS) + SEL('Ubicación', 'fans.loc', LOCOPTS) +
+    '<p class="hint" style="grid-column:1/-1;margin:0">Al elegir el motor se carga el calor de la Tabla 6 del cap. 24 (ASHRAE 2010) como potencia por unidad. Si conocés la potencia eléctrica real, ingresala a mano.</p>';
+}
+function applyProduct(id){
+  var p = PROD.filter(function(x){ return x.id === id; })[0];
+  if (!p){ S.prod.respMode = 'manual'; sync('prod.respMode'); return; }
+  var q = prodProps(p), nz = function(x){ return x == null ? NaN : x; };
+  S.prod.name = p.es; S.prod.shA = nz(q.shA); S.prod.shB = nz(q.shB); S.prod.lat = nz(q.lat); S.prod.tFr = nz(q.tFr);
+  S.prod.respMode = p.r ? 'min' : 'manual';
+  ['name', 'shA', 'shB', 'lat', 'tFr', 'respMode'].forEach(function(f){ sync('prod.' + f); });
+}
+function applyMotor(){
+  var hp = parseFloat(S.fans.hp), row = MOTORS.filter(function(r){ return r[0] === hp; })[0];
+  if (!row) return;
+  var idx = {A: 1, B: 2, C: 3}[S.fans.loc || 'A'];
+  S.fans.w = Math.round(row[idx]*BTU_H*10)/10; sync('fans.w');
+}
+function prodInfoHtml(){
+  var P = S.prod, p = PROD.filter(function(x){ return x.id === P.id; })[0], out = [];
+  var W_ = function(t){ return '<span class="warn">' + t + '</span>'; };
+  if (p){
+    var q = prodProps(p);
+    out.push('Propiedades: ' + (p.src === 'c41' ? 'ASHRAE 2010, cap. 41, Tabla 2' : p.src === 'na' ? 'ASHRAE 2010' : p.src === 't9' ? 'ASHRAE 2010, cap. 19, Tabla 9 (solo respiración)' : 'ASHRAE 2010, cap. 19, Tabla 3') + (p.xw != null ? ' · agua ' + f1.format(p.xw) + ' %' : '') + '.');
+    if (p.note) out.push(E(p.note));
+    if (q.tfDefault) out.push(W_('La tabla no da punto de congelación para este producto: se cargó −2,2 °C (28 °F) como valor por defecto del programa, que no es un dato del ASHRAE. Verificalo si el producto se congela.'));
+  }
+  if (P.respMode === 'min' || P.respMode === 'max'){
+    var rd = R && R.prod.respInfo;
+    if (!p || !p.r) out.push(W_('No hay dato de respiración cargado para este producto: elegí «Valor manual». Puede figurar en la Tabla 9 del manual con varias variedades u orígenes que no se cargaron.'));
+    else if (rd && rd.none) out.push(W_('No hay dato de respiración cargado a esta temperatura de cámara (columnas de 0, 5, 10 y 15 °C, con tolerancia de 5 °F): la respiración se toma como 0.'));
+    else if (rd){
+      var cC = (rd.col - 32)/1.8;
+      out.push('Respiración (Tabla 9' + (p.r.n ? ', ' + E(p.r.n) : '') + '), columna de ' + f0.format(cC) + ' °C: ' + f1.format(rd.lo) + ' a ' + f1.format(rd.hi) + ' kJ/kg·24 h. Se usa el ' + (P.respMode === 'max' ? 'máximo' : 'mínimo') + ': ' + f1.format(rd.kj) + '.' + (Math.abs(n(S.cond.tRoom) - cC) > 0.5 ? ' La cámara está a ' + f1.format(n(S.cond.tRoom)) + ' °C.' : ''));
+    }
+  }
+  return out.join('<br>');
+}
 function wallTile(i){
   var p = 'walls.' + i;
   return '<div class="tile"><h3>Pared ' + (i + 1) + '</h3><div class="grid g2">' +
@@ -346,7 +532,10 @@ function doorTile(i){
     F('Pasadas por día', p + '.P') + F('Apertura y cierre por pasada', p + '.tp', {u:'s'}) +
     F('Tiempo abierta sin uso por día', p + '.to', {u:'min'}) + F('Efectividad del protector (0 a 1)', p + '.E') +
     F('Factor de flujo (vacío = ASHRAE)', p + '.df', {w:true}) +
-    '</div><p class="calc" id="calc-d' + i + '"></p><div class="tools"><button class="btn quiet" type="button" data-deldoor="' + i + '" aria-label="Quitar puerta ' + (i + 1) + '">Quitar puerta</button></div></div>';
+    CHK('Agregar flujo directo (ecuación 16)', p + '.fd') +
+    F('Velocidad del aire', p + '.V', {u:'m/s', if:p + '.fd=true'}) + F('Fracción del tiempo con flujo (0 a 1)', p + '.dd', {if:p + '.fd=true'}) +
+    F('Abertura efectiva (vacío = ancho × alto)', p + '.Ad', {u:'m²', w:true, if:p + '.fd=true'}) +
+    '</div><p class="hint" data-if="' + p + '.fd=true">Ecuación 16 del ASHRAE: q = V · A · ρ · Δh · Dt, para flujo continuo por presión negativa en el edificio. A es la menor de las aberturas de entrada y salida. El manual da como velocidad típica por una puerta de 0,3 a 1,5 m/s (60 a 300 pies/min), pero aclara que la presión diferencial es difícil de estimar: ingresá un valor medido o supuesto. Se suma a la infiltración por uso de la puerta.</p><p class="calc" id="calc-d' + i + '"></p><div class="tools"><button class="btn quiet" type="button" data-deldoor="' + i + '" aria-label="Quitar puerta ' + (i + 1) + '">Quitar puerta</button></div></div>';
 }
 function buildForm(){
   $('form').innerHTML =
@@ -358,32 +547,36 @@ function buildForm(){
   '</div><div class="logo"><label class="btn quiet" style="display:inline-flex;align-items:center;cursor:pointer">Subir logo<input type="file" id="logoFile" accept="image/*" hidden></label><img id="logoPrev" alt="Logo cargado" hidden><button class="btn quiet" id="logoDel" type="button" hidden>Quitar logo</button><span class="hint" style="margin:0">El logo queda guardado en este navegador y sale en el encabezado del PDF.</span></div></section>' +
 
   '<section class="sec"><h2>Condiciones de diseño</h2><div class="grid">' +
-    F('Temperatura ambiente', 'cond.tAmb', {u:'°C'}) + F('HR ambiente', 'cond.rhAmb', {u:'%'}) +
+    SEL('Sitio: cargar temperatura de diseño de verano', 'cond.sitio', DESOPTS, {w:true}) + F('Temperatura ambiente', 'cond.tAmb', {u:'°C'}) + F('HR ambiente', 'cond.rhAmb', {u:'%'}) +
     F('Temperatura de la cámara', 'cond.tRoom', {u:'°C'}) + F('HR de la cámara', 'cond.rhRoom', {u:'%'}) +
     F('Horas de marcha', 'cond.horas', {u:'h/día'}) + F('Contingencia', 'cond.cont', {u:'%'}) +
     SEL('Hemisferio (efecto solar)', 'cond.hemi', [['sur','Sur'],['norte','Norte']]) +
-    SEL('Horas de marcha: método', 'cond.metodo', [['mult','Multiplicativo (×24/h)'],['coolcalc','Igual que Coolcalc']], {w:true}) +
+    SEL('Horas de marcha: método', 'cond.metodo', [['mult','Multiplicativo (×24/h)'],['sumado','Ganancias × (24/h − 1), sumado']], {w:true}) +
   '</div><details class="adv"><summary>Resistencias superficiales (opcional)</summary><div class="grid sub2">' +
     F('Interior', 'cond.rsi', {u:'m²K/W'}) + F('Exterior', 'cond.rse', {u:'m²K/W'}) +
   '</div><p class="hint">Solo se usan cuando la aislación se carga por material y espesor. En 0 se ignoran, como permite el ASHRAE para paredes gruesas de baja conductividad.</p></details>' +
-  '<p class="hint">El ASHRAE (ed. 2002) recomienda aumentar la carga un 10 % para cubrir discrepancias de diseño. La temperatura y la HR se usan para la infiltración.</p></section>' +
+  '<p class="hint">El ASHRAE recomienda aumentar la carga un 10 % para cubrir discrepancias de diseño. La temperatura y la HR se usan para la infiltración. Para la temperatura ambiente, el cap. 23 indica tomar la mayor temperatura media del aire durante tres a cinco días consecutivos en el sitio. Si elegís un sitio se carga la temperatura de diseño de verano de la norma IRAM 11603 (borrador de 2011): es el percentil 99 de las máximas diarias de diciembre a marzo, una referencia conservadora porque el ASHRAE pide un promedio de varios días seguidos, que da valores menores. Batán, Miramar y Villa Mercedes usan una estación cercana. No hay dato con fuente para Balcarce, General Roca, Puerto Madryn ni Canals, ni de humedad: ingresalos. Siempre se puede editar el valor.</p></section>' +
 
   '<section class="sec"><h2>Cámara</h2><div class="grid">' +
     F('Largo', 'geo.L', {u:'m'}) + F('Ancho', 'geo.W', {u:'m'}) + F('Alto', 'geo.H', {u:'m'}) +
   '</div><p class="hint" id="geoHint"></p></section>' +
 
   '<section class="sec"><h2>Paredes</h2><div class="tiles">' + [0,1,2,3].map(wallTile).join('') + '</div>' +
-  '<p class="hint">El aumento de Δt por sol sale de la Tabla 3 del ASHRAE según orientación y tipo de superficie. La tabla no distingue hemisferio: en el hemisferio sur la pared norte usa la columna de pared sur y la pared sur no lleva aumento. Esa adaptación no está en el ASHRAE.</p></section>' +
+  '<p class="hint" id="minInsHint"></p><p class="hint">El aumento de Δt por sol sale de la Tabla 3 del ASHRAE según orientación y tipo de superficie. La tabla no distingue hemisferio: en el hemisferio sur la pared norte usa la columna de pared sur y la pared sur no lleva aumento. Esa adaptación no está en el ASHRAE.</p></section>' +
 
   '<section class="sec"><h2>Piso y techo</h2><div class="tiles">' +
-    '<div class="tile"><h3>Piso</h3><div class="grid g2">' + F('Temp. bajo el piso', 'floor.tBelow', {u:'°C'}) + insul('floor') + '</div><p class="calc" id="calc-floor"></p></div>' +
+    '<div class="tile"><h3>Piso</h3><div class="grid g2">' + SEL('Tipo de piso', 'floor.tipo', FLOOROPTS, {w:true}) + F('Temp. bajo el piso', 'floor.tBelow', {u:'°C', if:'floor.tipo!=losa'}) +
+        SEL('Sitio (clima)', 'floor.ciudad', CITYOPTS, {w:true, if:'floor.tipo=losa'}) + F('Temp. media anual del aire', 'floor.tMed', {u:'°C', if:'floor.tipo=losa'}) + F('Amplitud anual del aire', 'floor.tAmp', {u:'K', if:'floor.tipo=losa'}) +
+        SEL('Tipo de suelo', 'floor.suelo', SOILOPTS, {w:true, if:'floor.tipo=losa'}) + F('Conductividad del suelo', 'floor.ks', {u:'W/mK', if:'floor.tipo=losa'}) + F('Difusividad del suelo', 'floor.als', {u:'×10⁻⁷ m²/s', if:'floor.tipo=losa'}) +
+        SEL('Aislación de la losa', 'floor.cfg', CFGOPTS, {w:true, if:'floor.tipo=losa'}) + F('Resistencia de la losa', 'floor.Rf', {u:'m²K/W', if:'floor.tipo=losa'}) +
+        F('Largo de aislación parcial', 'floor.c', {u:'m', if:'floor.tipo=losa&floor.cfg!=none&floor.cfg!=uniform'}) + F('Perímetro expuesto (vacío: completo)', 'floor.P', {u:'m', if:'floor.tipo=losa'}) + insul('floor') + '</div><p class="hint" id="floorHint"></p><p class="hint" id="soilHint" hidden></p><p class="calc" id="calc-floor"></p></div>' +
     '<div class="tile"><h3>Techo</h3><div class="grid g2">' + SEL('Ubicación', 'ceil.tipo', [['ext','Externo'],['int','Interno']]) +
       F('Temp. sobre el techo', 'ceil.tAbove', {u:'°C', if:'ceil.tipo=int'}) + insul('ceil') + sunBlock('ceil', 'ceil.tipo=ext') +
     '</div><p class="calc" id="calc-ceil"></p></div>' +
-  '</div></section>' +
+  '</div><p class="hint">El ASHRAE 2010 describe, pero no publica completa, la correlación de losa sobre terreno (Chuangchid y Krarti, 2000). Por eso el piso se calcula como una pared (U · A · Δt con la temperatura que se ingrese) o, para cámaras sobre 0 °C, con el método simplificado de Krarti y Chuangchid (1999), que es otra fuente.</p></section>' +
 
   '<section class="sec"><h2>Infiltración</h2><div class="grid">' +
-    SEL('Método', 'infil.metodo', [['puertas','ASHRAE: por puertas (ec. 10 a 14)'],['ac','Cambios de aire (dato ingresado)']], {w:true}) +
+    SEL('Método', 'infil.metodo', [['puertas','ASHRAE: por puertas (ec. 11 a 13 y 15)'],['ac','Cambios de aire (dato ingresado)']], {w:true}) +
     F('Cambios de aire cada 24 h', 'infil.ac', {w:true, if:'infil.metodo=ac'}) +
     F('Volumen para infiltración (opcional)', 'geo.vol', {u:'m³', w:true, if:'infil.metodo=ac'}) +
     F('Período de cálculo', 'infil.td', {u:'h', w:true, if:'infil.metodo=puertas'}) +
@@ -392,21 +585,23 @@ function buildForm(){
   '<p class="hint">Las pasadas y el tiempo abierta sin uso se cuentan sobre el período de cálculo. Tiempo de apertura y cierre por pasada, según el ASHRAE: 15 a 25 s en puertas convencionales de cordón y 5 a 10 s en puertas rápidas. Factor de flujo recomendado: 1,1 con diferencias menores de 11 K y 0,8 con diferencias mayores. Efectividad del protector: sin protección 0; cortinas de tiras o puertas rápidas nuevas 0,95 o más, que puede bajar a 0,8 en cámaras de congelado y 0,85 en otras; antecámara con cortinas 0,95 a 0,85 en congelado y 0,95 a 0,90 en otras; cortinas de aire desde muy pobre hasta más de 0,7.</p></div>' +
   '<p class="calc" id="calc-inf"></p></section>' +
 
-  '<section class="sec"><h2>Producto</h2><div class="grid">' +
+  '<section class="sec"><h2>Producto</h2><div class="grid">' + prodSelect() +
     F('Producto', 'prod.name', {t:'text'}) + F('Cantidad que ingresa', 'prod.mass', {u:'kg'}) +
     F('Temp. de entrada', 'prod.tIn', {u:'°C'}) + F('Temp. requerida', 'prod.tOut', {u:'°C'}) +
     F('Tiempo de enfriamiento', 'prod.hrs', {u:'h'}) + F('Temp. de congelación', 'prod.tFr', {u:'°C'}) +
     F('Calor esp. sobre cong.', 'prod.shA', {u:'kJ/kg°C'}) + F('Calor esp. bajo cong.', 'prod.shB', {u:'kJ/kg°C'}) +
-    F('Calor latente', 'prod.lat', {u:'kJ/kg'}) + F('Calor de respiración', 'prod.resp', {u:'kJ/kg·24h'}) +
+    F('Calor latente', 'prod.lat', {u:'kJ/kg'}) +
     F('Producto almacenado', 'prod.stored', {u:'kg'}) + F('Factor de severidad', 'prod.sev') +
-  '</div><p class="hint">Las propiedades del producto se ingresan a mano. Sus valores están en el capítulo de propiedades térmicas de alimentos del ASHRAE Handbook—Refrigeration y la respiración en la tabla de calor de respiración de frutas y verduras de ese manual (Tabla 9 del capítulo 8 en la edición 2002).</p><p class="calc" id="calc-prod"></p></section>' +
+    SEL('Calor de respiración', 'prod.respMode', [['manual','Valor manual'],['min','Tabla 9: mínimo (almacenamiento)'],['max','Tabla 9: máximo (primeros días)']]) +
+    F('Respiración (manual)', 'prod.resp', {u:'kJ/kg·24h', if:'prod.respMode=manual'}) +
+  '</div><p class="hint">Al elegir un producto se cargan sus propiedades del ASHRAE Handbook—Refrigeration 2010 (cap. 19, Tabla 3; pan: cap. 41). Para la respiración, el ASHRAE indica el valor mínimo de la Tabla 9 para almacenamiento en equilibrio y el máximo para el primer o segundo día tras la cosecha (preenfriado y transporte corto). Todos los campos quedan editables. Las propiedades varían con la variedad y la composición: son valores de referencia.</p><p class="hint" id="prodInfo"></p><p class="calc" id="calc-prod"></p></section>' +
 
   '<section class="sec"><h2>Equipos, personas y otras cargas</h2><div class="tiles">' +
     ['fans:Ventiladores:Potencia eléctrica por unidad', 'lights:Iluminación:Potencia por unidad', 'people:Personas:Calor por persona'].map(function(x){
       var a = x.split(':'), k = a[0];
-      return '<div class="tile"><h3>' + a[1] + '</h3><div class="grid g2">' + F('Cantidad', k + '.n') + F(a[2], k + '.w', {u:'W'}) + F('Uso', k + '.h', {u:'h/día'}) + '</div><p class="calc" id="calc-' + k + '"></p></div>';
+      return '<div class="tile"><h3>' + a[1] + '</h3><div class="grid g2">' + F('Cantidad', k + '.n') + F(a[2], k + '.w', {u:'W'}) + F('Uso', k + '.h', {u:'h/día'}) + (k === 'fans' ? motorPick() : '') + '</div><p class="calc" id="calc-' + k + '"></p></div>';
     }).join('') +
-  '</div><p class="hint">Ventiladores e iluminación: se cuenta toda la energía eléctrica disipada dentro de la cámara. Calor por persona: si se deja vacío se usa la ecuación del ASHRAE, 272 − 6t (W, con t en °C).</p>' +
+  '</div><p class="hint">Ventiladores e iluminación: se cuenta toda la energía eléctrica disipada dentro de la cámara. Calor por persona: si se deja vacío se usa la ecuación 10 del ASHRAE 2010, 1295 − 11,5t (Btu/h, con t en °F), convertida a W. Con mucho movimiento de personas el manual sugiere multiplicar por 1,25.</p>' +
   '<div class="sub2"><h3>Otras cargas</h3><div id="miscRows"></div><button class="btn quiet" id="btnMisc" type="button">Agregar carga</button></div></section>';
   renderMisc(); renderDoors();
 }
@@ -433,7 +628,7 @@ function fillOne(el){
 function fill(root){ root.querySelectorAll('[data-k]').forEach(fillOne); }
 function applyIf(){
   document.querySelectorAll('[data-if]').forEach(function(el){
-    var ok = el.dataset.if.split('&').every(function(c){ var p = c.split('='); return String(getp(p[0])) === p[1]; });
+    var ok = el.dataset.if.split('&').every(function(c){ var m = /^([^=!]+)(!?=)(.*)$/.exec(c), eq = String(getp(m[1])) === m[3]; return m[2] === '=' ? eq : !eq; });
     el.hidden = !ok;
   });
 }
@@ -449,6 +644,11 @@ $('form').addEventListener('input', function(e){
     var key = k === 'geo.L' ? 0 : 1;
     [key, key + 2].forEach(function(i){ S.walls[i].width = v; sync('walls.' + i + '.width'); });
   }
+  if (k === 'prod.id') applyProduct(v);
+  if (k === 'floor.ciudad') applyCity(v);
+  if (k === 'cond.sitio'){ var cs = CITIES.filter(function(x){ return x[0] === v; })[0]; if (cs && cs[5] != null){ S.cond.tAmb = cs[5]; sync('cond.tAmb'); } }
+  if (k === 'floor.suelo') applySoil(v);
+  if (k === 'fans.hp' || k === 'fans.loc') applyMotor();
   var mm = /^(walls\.\d|floor|ceil)\.mat$/.exec(k);
   if (mm && v !== 'otro'){ setp(mm[1] + '.k', matK(v)); sync(mm[1] + '.k'); }
   update();
@@ -513,7 +713,11 @@ function update(){
     $('calc-w' + i).innerHTML = 'A <b>' + f1.format(w.A) + ' m²</b> · U <b>' + f3.format(w.U) + '</b> · Δt <b>' + f1.format(w.dT) + ' K</b>' + (w.dsun ? ' + sol <b>' + f1.format(w.dsun) + ' K</b>' : '') +
       '<br>Transmisión <b>' + f0.format(w.ins) + ' W</b> · Sol <b>' + f0.format(w.sol) + ' W</b> · Total <b>' + f0.format(w.tot) + ' W</b>' + (w.sunMissing ? '<br>' + WARN_SUN : '');
   });
-  $('calc-floor').innerHTML = 'A <b>' + f1.format(R.floor.A) + ' m²</b> · U <b>' + f3.format(R.floor.U) + '</b> · Δt <b>' + f1.format(R.floor.dT) + ' K</b><br>Total <b>' + f0.format(R.floor.tot) + ' W</b>';
+  if (S.floor.tipo === 'losa'){
+    var L_ = R.floor.losa;
+    $('calc-floor').innerHTML = L_.ok ? ('A <b>' + f1.format(R.floor.A) + ' m²</b> · A/P <b>' + f2.format(R.floor.AP) + ' m</b> · R equivalente <b>' + f2.format(L_.Req) + ' m²K/W</b><br>U efectiva media <b>' + f3.format(L_.Um) + '</b> · de amplitud <b>' + f3.format(L_.Ua) + '</b> W/m²K<br>Media <b>' + f0.format(R.floor.Qm) + ' W</b> + amplitud <b>' + f0.format(R.floor.Qa) + ' W</b><br>Total <b>' + f0.format(R.floor.tot) + ' W</b>' + (L_.warnAP ? '<br>A/P menor a 0,5 m: el método no es preciso.' : '')) : ('Falta un dato: ' + L_.msg);
+  } else
+  $('calc-floor').innerHTML = 'A <b>' + f1.format(R.floor.A) + ' m²</b> · U <b>' + f3.format(R.floor.U) + '</b> · Δt <b>' + f1.format(R.floor.dT) + ' K</b>' + (R.floor.auto ? ' (terreno a 4,4 °C)' : '') + '<br>Total <b>' + f0.format(R.floor.tot) + ' W</b>';
   $('calc-ceil').innerHTML = 'A <b>' + f1.format(R.ceil.A) + ' m²</b> · U <b>' + f3.format(R.ceil.U) + '</b> · Δt <b>' + f1.format(R.ceil.dT) + ' K</b>' + (R.ceil.dsun ? ' + sol <b>' + f1.format(R.ceil.dsun) + ' K</b>' : '') +
     '<br>Transmisión <b>' + f0.format(R.ceil.ins) + ' W</b> · Sol <b>' + f0.format(R.ceil.sol) + ' W</b> · Total <b>' + f0.format(R.ceil.tot) + ' W</b>' + (R.ceil.sunMissing ? '<br>' + WARN_SUN : '');
   var I = R.inf;
@@ -523,11 +727,22 @@ function update(){
     $('calc-inf').innerHTML = 'h exterior <b>' + f1.format(I.hA) + ' kJ/kg</b> · h cámara <b>' + f1.format(I.hR) + ' kJ/kg</b><br>Ganancia por infiltración <b>' + f0.format(I.Q) + ' W</b> · humedad <b>' + f2.format(I.moist) + ' kg/h</b>';
     I.doors.forEach(function(d, i){
       var el = $('calc-d' + i); if (!el) return;
-      el.innerHTML = 'A <b>' + f2.format(d.A) + ' m²</b> · flujo pleno <b>' + f1.format(d.q) + ' kW</b><br>Dt <b>' + f3.format(d.Dt) + '</b> · Df <b>' + f2.format(d.Df) + '</b> · E <b>' + f2.format(d.E) + '</b><br>Ganancia <b>' + f0.format(d.Qw) + ' W</b>';
+      el.innerHTML = 'A <b>' + f2.format(d.A) + ' m²</b> · flujo pleno <b>' + f1.format(d.q) + ' kW</b><br>Dt <b>' + f3.format(d.Dt) + '</b> · Df <b>' + f2.format(d.Df) + '</b> · E <b>' + f2.format(d.E) + '</b>' + (d.Qd > 0 ? '<br>Flujo directo <b>' + f0.format(d.Qd) + ' W</b>' : '') + '<br>Ganancia <b>' + f0.format(d.Qw) + ' W</b>';
     });
   }
   $('calc-prod').innerHTML = 'Enfriamiento <b>' + f0.format(R.prod.cool) + ' W</b> · respiración <b>' + f0.format(R.prod.resp) + ' W</b> · total <b>' + f0.format(R.prod.tot) + ' W</b>';
   ['fans', 'lights', 'people'].forEach(function(k){ $('calc-' + k).innerHTML = 'Ganancia <b>' + f0.format(R[k]) + ' W</b>' + (k === 'people' && !(n(S.people.w) > 0) ? ' · ASHRAE <b>' + f0.format(R.peopleW) + ' W</b> por persona' : ''); });
+  var pi = $('prodInfo'); if (pi) pi.innerHTML = prodInfoHtml();
+  var fh = $('floorHint'); if (fh) fh.textContent = FLOORHINT[S.floor.tipo] || FLOORHINT.manual;
+  var sh = $('soilHint');
+  if (sh){
+    var ss = SOILS.filter(function(x){ return x[0] === S.floor.suelo; })[0], cc = CITIES.filter(function(x){ return x[0] === S.floor.ciudad; })[0];
+    sh.textContent = (cc ? 'Clima: ' + cc[4] + '. Amplitud calculada como (mes más cálido − mes más frío) / 2 de las medias mensuales. ' : '') + (ss ? 'Rango de la fuente para este suelo: k de ' + f1.format(ss[2]) + ' a ' + f1.format(ss[3]) + ' W/m·K y α de ' + f1.format(ss[4]/86400*1e7) + ' a ' + f1.format(ss[5]/86400*1e7) + ' ×10⁻⁷ m²/s. Se cargó el extremo alto de k, que da más carga: ajustalo según el estudio de suelos. ' : '') + (S.floor.tipo === 'losa' ? 'La resistencia de la losa y el material y espesor de la aislación se ingresan a mano: el libro usa 0,587 m²K/W para 100 mm de hormigón liviano en su ejemplo. Con aislación parcial, la aislación ingresada es la de la franja.' : '');
+    sh.hidden = S.floor.tipo !== 'losa';
+  }
+  var ft = $('f-floor-tBelow'); if (ft) ft.placeholder = S.floor.tipo === 'calef' ? '4,4 (ASHRAE)' : '0';
+  var mi = minIns(n(S.cond.tRoom)), mh = $('minInsHint');
+  if (mh) mh.textContent = mi ? 'Referencia (cap. 24, Tabla 2): espesor mínimo de poliisocianurato expandido recomendado por la industria para ' + f1.format(n(S.cond.tRoom)) + ' °C: ' + f0.format(mi.n) + ' mm en el norte de EE.UU. y ' + f0.format(mi.s) + ' mm en el sur de EE.UU. El manual aclara que puede requerir más espesor por puentes térmicos. No es una norma argentina.' : 'Referencia (cap. 24, Tabla 2): la tabla del ASHRAE cubre cámaras entre −40 y 16 °C aproximadamente.';
   var pw = $('f-people-w'); if (pw) pw.placeholder = f0.format(R.peopleW) + ' (ASHRAE)';
   $('geoHint').textContent = 'Superficie de piso y techo: ' + f1.format(R.area) + ' m² (medidas exteriores). Volumen interior: ' + f1.format(R.volInt) + ' m³ (medidas exteriores menos los espesores de paredes, piso y techo).' + (n(S.geo.vol) > 0 && S.infil.metodo === 'ac' ? ' Con el método de cambios de aire se usa el volumen manual de ' + f1.format(n(S.geo.vol)) + ' m³.' : '');
 }
@@ -563,6 +778,8 @@ $('fileOpen').addEventListener('change', function(e){
     try {
       var o = JSON.parse(rd.result), b = newCase();
       ['proj','cond','geo','floor','ceil','infil','prod','fans','lights','people'].forEach(function(k){ Object.assign(b[k], o[k] || {}); });
+      if (b.cond.metodo !== 'mult') b.cond.metodo = 'sumado';
+      if (b.floor.tipo === 'terreno') b.floor.tipo = 'manual';
       if (Array.isArray(o.walls)) b.walls = b.walls.map(function(w, i){ return Object.assign(w, o.walls[i] || {}); });
       b.infil.doors = (o.infil && Array.isArray(o.infil.doors)) ? o.infil.doors.map(function(d){ return baseDoor(d); }) : [baseDoor()];
       if (Array.isArray(o.misc)) b.misc = o.misc.map(function(r){ return {desc:r.desc || '', w:r.w == null ? NaN : r.w}; });
@@ -665,15 +882,28 @@ function buildPdf(S, R){
   var F_ = S.floor, Ce = S.ceil;
   table(['', 'Piso', 'Techo'], [
     ['Ubicación', '-', Ce.tipo === 'ext' ? 'Externo' : 'Interno'],
-    ['Temperatura del otro lado', f1.format(R.floor.To) + ' °C', f1.format(R.ceil.To) + ' °C'],
-    ['U', f3.format(R.floor.U) + ' W/m²K', f3.format(R.ceil.U) + ' W/m²K'],
-    ['Aislación', insLabel(F_), insLabel(Ce)],
+    ['Tipo de piso', (FLOOROPTS.filter(function(x){ return x[0] === F_.tipo; })[0] || FLOOROPTS[0])[1].replace('Congelados con calefacción bajo piso', 'Con calefacción bajo piso').replace('Tubos o ductos ventilados con aire', 'Ventilado con aire'), '-'],
+    [F_.tipo === 'losa' ? 'Temp. media anual del aire' : 'Temperatura del otro lado', f1.format(R.floor.To) + ' °C' + (R.floor.auto ? ' *' : ''), f1.format(R.ceil.To) + ' °C'],
+    [F_.tipo === 'losa' ? 'U efectiva (media)' : 'U', f3.format(R.floor.U) + ' W/m²K', f3.format(R.ceil.U) + ' W/m²K'],
+    ['Aislación', F_.tipo === 'losa' && F_.cfg === 'none' ? 'Sin aislación' : insLabel(F_), insLabel(Ce)],
     ['Espesor', f0.format(n(F_.esp)) + ' mm', f0.format(n(Ce.esp)) + ' mm'],
     ['Aumento de dif. de temp. por sol', '-', f1.format(R.ceil.dsun) + ' °C'],
     ['Ganancia por transmisión', W(R.floor.tot), W(R.ceil.ins)],
     ['Ganancia solar', '-', W(R.ceil.sol)],
     ['Ganancia total', W(R.floor.tot), W(R.ceil.tot)]
   ], 56, [8]);
+  if (F_.tipo === 'losa' && R.floor.losa && R.floor.losa.ok){
+    var KL = R.floor.losa, cityN = (CITIES.filter(function(x){ return x[0] === F_.ciudad; })[0] || ['', 'ingresado a mano'])[1], soilN = (SOILS.filter(function(x){ return x[0] === F_.suelo; })[0] || ['', 'ingresado a mano'])[1];
+    table(['Losa sobre terreno', 'Dato'], [
+      ['Sitio / suelo', cityN + ' / ' + soilN],
+      ['Amplitud anual del aire', f2.format(R.floor.Tamp) + ' K'],
+      ['k suelo / difusividad', f2.format(n(F_.ks)) + ' W/mK / ' + f2.format(n(F_.als)) + 'e-7 m²/s'],
+      ['A/P (perímetro ' + f1.format(R.floor.P) + ' m)', f2.format(R.floor.AP) + ' m'],
+      ['Resistencia equivalente', f2.format(KL.Req) + ' m²K/W'],
+      ['Parte media anual', W(R.floor.Qm)],
+      ['Parte de amplitud anual', W(R.floor.Qa)]
+    ], 80, []);
+  }
 
   sec('Infiltración');
   var I = R.inf;
@@ -684,14 +914,14 @@ function buildPdf(S, R){
     var dr = I.doors.map(function(d, i){ var sd = S.infil.doors[i]; return ['Puerta ' + (i + 1), f2.format(n(sd.w)) + ' x ' + f2.format(n(sd.h)), f0.format(n(sd.P)), f0.format(n(sd.tp)), f0.format(n(sd.to)), f3.format(d.Dt), f2.format(d.Df), f2.format(d.E), W(d.Qw)]; });
     if (dr.length) table(['', 'Ancho x alto m', 'Pasadas/día', 'Apertura s', 'Abierta min', 'Dt', 'Df', 'E', 'Ganancia'], dr, 20, null);
     kv([['Método', 'ASHRAE, por puertas'], ['Período de cálculo', f1.format(n(S.infil.td) > 0 ? n(S.infil.td) : 24) + ' h'], ['Entalpía exterior', f1.format(I.hA) + ' kJ/kg'], ['Entalpía de la cámara', f1.format(I.hR) + ' kJ/kg'],
-        ['Humedad a remover', f2.format(I.moist) + ' kg/h'], ['Ganancia total', W(I.Q)]], 2);
+        ['Humedad a remover', f2.format(I.moist) + ' kg/h']].concat(I.doors.some(function(d){ return d.Qd > 0; }) ? [['Flujo directo (ec. 16), incluido', W(I.doors.reduce(function(a, d){ return a + d.Qd; }, 0))]] : []).concat([['Ganancia total', W(I.Q)]]), 2);
   }
 
   sec('Producto');
   var Pr = S.prod;
   kv([['Producto', Pr.name || '-'], ['Cantidad que ingresa', f0.format(n(Pr.mass)) + ' kg'], ['Temp. de entrada', f1.format(n(Pr.tIn)) + ' °C'], ['Temp. requerida', f1.format(n(Pr.tOut)) + ' °C'],
       ['Tiempo de enfriamiento', f1.format(R.prod.t) + ' h'], ['Temp. de congelación', f1.format(n(Pr.tFr)) + ' °C'], ['Calor esp. sobre cong.', f3.format(n(Pr.shA)) + ' kJ/kg°C'], ['Calor esp. bajo cong.', f3.format(n(Pr.shB)) + ' kJ/kg°C'],
-      ['Calor latente', f1.format(n(Pr.lat)) + ' kJ/kg'], ['Factor de severidad', f2.format(n(Pr.sev) > 0 ? n(Pr.sev) : 1)], ['Producto almacenado', f0.format(n(Pr.stored)) + ' kg'], ['Respiración', f1.format(n(Pr.resp)) + ' kJ/kg 24 h'],
+      ['Calor latente', f1.format(n(Pr.lat)) + ' kJ/kg'], ['Factor de severidad', f2.format(n(Pr.sev) > 0 ? n(Pr.sev) : 1)], ['Producto almacenado', f0.format(n(Pr.stored)) + ' kg'], ['Respiración', (Pr.respMode === 'min' || Pr.respMode === 'max') ? f1.format(R.prod.respKJ) + ' kJ/kg 24 h (' + (Pr.respMode === 'max' ? 'máx.' : 'mín.') + ', Tabla 9)' : f1.format(n(Pr.resp)) + ' kJ/kg 24 h'], ['Origen de propiedades', (PROD.filter(function(x){ return x.id === Pr.id; })[0]) ? 'ASHRAE 2010 (base de datos)' : 'Ingreso manual'],
       ['Ganancia por enfriamiento', W(R.prod.cool)], ['Ganancia por respiración', W(R.prod.resp)], ['Ganancia total', W(R.prod.tot)]], 2);
 
   sec('Ventiladores, iluminación y personas');
@@ -724,13 +954,16 @@ function buildPdf(S, R){
   need(30);
   doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor.apply(doc, MUT);
   var notes = [
-    'Fuente de datos de tablas y ecuaciones: ASHRAE Handbook - Refrigeration, capítulo Refrigeration Load, edición 2002 (SI). Psicrometría: ASHRAE Handbook - Fundamentals.',
-    'Horas de marcha: ' + (C.metodo === 'coolcalc' ? 'ganancias x (24 / horas de marcha - 1), sumado a ganancias y contingencia, igual que el programa Coolcalc.' : '(ganancias + contingencia) x 24 / horas de marcha.'),
-    I.method === 'ac' ? 'Infiltración: volumen x cambios de aire / 24, por diferencia de entalpía entre el aire exterior y el de la cámara. Los cambios de aire son un dato ingresado.' : 'Infiltración por puertas: ecuaciones 10 a 14 del ASHRAE (flujo pleno de Gosney y Olama, tiempo abierto, factor de flujo y efectividad del protector).',
+    'Fuente de tablas y ecuaciones: ASHRAE Handbook - Refrigeration, edición 2010, capítulos 19 (propiedades de alimentos), 23, 24 (cargas) y 41 (pan), convertidos de unidades inglesas a SI. Psicrometría: fórmulas de ASHRAE Handbook - Fundamentals.',
+    'Horas de marcha: ' + (C.metodo === 'sumado' ? 'ganancias x (24 / horas de marcha - 1), sumado a las ganancias y a la contingencia.' : '(ganancias + contingencia) x 24 / horas de marcha.'),
+    (I.method !== 'ac' && I.doors.some(function(d){ return d.Qd > 0; })) ? 'Flujo directo por puerta: ecuación 16 del ASHRAE 2010, q = V x A x densidad x diferencia de entalpía x fracción de tiempo. La velocidad y la fracción de tiempo son datos ingresados.' : '',
+    I.method === 'ac' ? 'Infiltración: volumen x cambios de aire / 24, por diferencia de entalpía entre el aire exterior y el de la cámara. Los cambios de aire son un dato ingresado.' : 'Infiltración por puertas: ecuaciones 11 a 13 y 15 del ASHRAE 2010 (flujo pleno de Gosney y Olama, tiempo abierto, factor de flujo y efectividad del protector).',
     'El efecto solar usa la Tabla 3 del ASHRAE. En el hemisferio sur la pared norte toma la columna de pared sur: adaptación que no figura en el ASHRAE.',
-    S.people.w > 0 ? 'Calor por persona: valor ingresado.' : 'Calor por persona: ecuación 9 del ASHRAE, 272 - 6t (W, t en °C).'
+    S.people.w > 0 ? 'Calor por persona: valor ingresado.' : 'Calor por persona: ecuación 10 del ASHRAE 2010, 1295 - 11,5t (Btu/h, t en °F), convertida a W.',
+    F_.tipo === 'losa' ? 'Piso: losa sobre terreno por el método simplificado de Krarti y Chuangchid (1999), publicado en el libro Energy Audit of Building Systems (Krarti), ecuaciones 6.35 a 6.37 y Tabla 6.5. No es el paper de 2000 que cita el ASHRAE y no contempla calefacción bajo piso. Clima: normales mensuales 1991-2020 del SMN (según tablas de Wikipedia que lo citan; Batán, Miramar y Canals usan estaciones cercanas). Suelo: ASHRAE (2000) según la tabla reproducida en Geothermal Energy. Es una estimación.' : 'Piso: calculado como una pared (U x A x dt). El ASHRAE 2010 no publica la correlación de losa sobre terreno completa.' + (R.floor.auto ? ' * Piso con calefacción: terreno a 4,4 °C (40 °F) bajo la aislación, según el cap. 23.' : ''),
+    'Los nombres de productos en español son traducción propia de los nombres del manual.'
   ];
-  notes.forEach(function(t){ var ls = doc.splitTextToSize(t, CW); ls.forEach(function(l){ need(5); txt(l, M, y); y += 3.8; }); y += 1; });
+  notes.filter(Boolean).forEach(function(t){ var ls = doc.splitTextToSize(t, CW); ls.forEach(function(l){ need(5); txt(l, M, y); y += 3.8; }); y += 1; });
 
   var np = doc.getNumberOfPages();
   for (var i = 1; i <= np; i++){
@@ -743,23 +976,26 @@ function buildPdf(S, R){
 
 /* ---------- fuentes ---------- */
 $('notesList').innerHTML = [
-  '<b>Edición de la fuente:</b> las tablas y ecuaciones de este programa salen del capítulo Refrigeration Load del ASHRAE Handbook—Refrigeration, edición 2002 (SI), reproducido en línea. No se pudo consultar una edición más reciente. Cada valor de tabla se puede reemplazar a mano (k, aumento por sol, calor por persona), de modo que se puede ajustar a la edición vigente.',
-  '<b>Transmisión:</b> Q = U · A · Δt (ec. 1) y U = 1 / Σ(x/k) (ec. 2 y 3). La chapa metálica de los paneles no entra en el U.',
-  '<b>Conductividad de aislantes (Tabla 1):</b> poliuretano 0,023 a 0,026, poliisocianurato 0,027, poliestireno extruido 0,035, poliestireno expandido 0,037, corcho 0,043 y vidrio celular 0,044 W/(m·K), envejecidos 180 días y a 24 °C de temperatura media. Con poliuretano se carga el extremo alto, 0,026.',
-  '<b>Efecto solar (Tabla 3):</b> aumento del Δt en K. Superficie oscura: este 5, sur 3, oeste 5, techo plano 11. Media: 4, 3, 4, 9. Clara: 3, 2, 3, 5. Se suma al Δt de la superficie expuesta al sol. La tabla no distingue hemisferio: la columna de pared sur se aplicó a la pared norte en el hemisferio sur y la pared sur queda sin aumento. Esa adaptación no figura en el ASHRAE.',
-  '<b>Calor de personas (Tabla 5, ec. 9):</b> qp = 272 − 6t, en W por persona con t en °C. La tabla redondea a la decena (por ejemplo 240 W a 5 °C contra 242 W de la ecuación).',
-  '<b>Infiltración por puertas (ec. 10 a 14):</b> qt = q · Dt · Df · (1 − E). El flujo pleno q sale de la ecuación de Gosney y Olama con las entalpías y densidades del aire exterior y del aire de la cámara. Se usó la densidad del aire seco con la entalpía por kg de aire seco: es una decisión de implementación que conviene contrastar con el texto original.',
-  '<b>Cambios de aire:</b> el método de cambios de aire usa un valor ingresado. La edición 2002 no trae tabla de cambios de aire por volumen, por eso no se cargó ninguna.',
-  '<b>Producto (ec. 4 a 8):</b> masa · calor específico · Δt, más calor latente si el producto cruza su temperatura de congelación, repartido en el tiempo de enfriamiento. Las propiedades del producto y la respiración no se cargaron: se ingresan desde el ASHRAE (capítulo de propiedades térmicas de alimentos).',
-  '<b>Equipos:</b> el ASHRAE toma la energía eléctrica efectivamente disipada dentro de la cámara (ventiladores según su tiempo de marcha real, iluminación completa). El calor de motores de la Tabla 4 no se cargó: se ingresa la potencia eléctrica absorbida.',
+  '<b>Edición de la fuente:</b> ASHRAE Handbook—Refrigeration 2010, capítulos 19 (Thermal Properties of Foods), 23 (Refrigerated-Facility Design), 24 (Refrigerated-Facility Loads) y 41 (Bakery Products). El manual está en unidades inglesas: se convirtió a SI con 1 Btu/lb·°F = 4,1868 kJ/kg·K, 1 Btu/lb = 2,326 kJ/kg, 1 Btu/h = 0,29307 W y 1 Btu·in/h·ft²·°F = 0,14413 W/m·K. Cada valor de tabla se puede reemplazar a mano.',
+  '<b>Transmisión:</b> Q = U · A · Δt y U = 1 / Σ(x/k). La chapa metálica de los paneles no entra en el U.',
+  '<b>Conductividad de aislantes (cap. 24, Tabla 1):</b> poliuretano 0,16 a 0,18 (se carga 0,18), poliisocianurato 0,19, poliestireno extruido 0,24, expandido 0,26, corcho 0,30 y vidrio celular 0,31 Btu·in/(h·ft²·°F), a 75 °F de media y envejecidos 180 días. El corcho se usa poco y esos datos son solo de referencia, según el manual.',
+  '<b>Espesor mínimo (cap. 24, Tabla 2):</b> es una referencia de la industria para poliisocianurato expandido en el norte y el sur de EE.UU. No es una norma ni se usa en el cálculo.',
+  '<b>Efecto solar (cap. 24, Tabla 3):</b> aumento del Δt, en °F en el manual: superficie oscura este 8, sur 5, oeste 8, techo plano 20. Media: 6, 4, 6, 15. Clara: 4, 2, 4, 9. Se convierte a K (÷ 1,8). La tabla no distingue hemisferio: la columna de pared sur se aplicó a la pared norte en el hemisferio sur y la pared sur queda sin aumento. Esa adaptación no figura en el ASHRAE.',
+  '<b>Calor de personas (cap. 24, ec. 10):</b> qp = 1295 − 11,5t, en Btu/h con t en °F. Para entradas frecuentes el manual sugiere multiplicar por 1,25.',
+  '<b>Infiltración por puertas (cap. 24, ec. 11 a 13 y 15):</b> qt = q · Dt · Df · (1 − E). El flujo pleno q es la ecuación de Gosney y Olama (0,221 en SI, equivalente a 795,6 en unidades inglesas). El factor de flujo recomendado es 1,1 con diferencias menores de 11 K y 0,8 con mayores. Se usó la densidad del aire seco con la entalpía por kg de aire seco: es una decisión de implementación.',
+  '<b>Cambios de aire:</b> el método usa un valor ingresado. El manual no trae una tabla de cambios de aire por volumen que se haya cargado.',
+  '<b>Producto (cap. 24, ec. 5 a 8):</b> masa · calor específico · Δt, más calor latente si el producto cruza su temperatura de congelación, repartido en el tiempo de enfriamiento.',
+  '<b>Base de productos:</b> propiedades del cap. 19, Tabla 3 (agua, punto de congelación, calores específicos y calor latente, 164 filas) y respiración de la Tabla 9. El pan sale del cap. 41, Tabla 2 (punto de congelación: punto medio de 16 a 20 °F). El kiwi no está en la Tabla 3: solo se carga su respiración. Cuando la tabla no da punto de congelación se usa −2,2 °C por defecto del programa, y se avisa. La respiración de la Tabla 9 está en Btu/día por tonelada corta (se tomó 2000 lb) y se transcribió de las páginas del manual: conviene contrastar los productos que se usen. Varios productos de la Tabla 9 con múltiples variedades u orígenes no se cargaron.',
+  '<b>Piso (cap. 23):</b> en congelados sobre terreno se usa la temperatura media anual del terreno; bajo 0 °C hace falta calefacción bajo piso (aire, glicol, resistencias, o tubos ventilados con aire ambiente en climas cálidos) y la carga se calcula con 4,4 °C (40 °F) de terreno contra la temperatura de la cámara. La correlación completa de losa sobre terreno (Chuangchid y Krarti, 2000) no está publicada en el manual y no se implementó.',
+  '<b>Motores (cap. 24, Tabla 6):</b> calor de motores eléctricos por potencia nominal, según estén dentro o fuera de la cámara el motor y el equipo accionado.',
   '<b>Contingencia:</b> el capítulo recomienda aumentar la carga un 10 % para cubrir discrepancias de diseño.',
-  '<b>Horas de marcha:</b> el capítulo no fija horas por día para el equipo. El método multiplicativo (carga × 24/h) no proviene de esa fuente. «Igual que Coolcalc» replica el cálculo del programa anterior.',
-  '<b>Psicrometría:</b> presión de saturación según Hyland y Wexler (ASHRAE Fundamentals), contrastada con la edición 2001 del manual y con una tabla de presión de vapor publicada (diferencia máxima 0,1 %). La relación de humedad, la entalpía y el volumen específico usan las constantes de las ediciones 2005 y 2009 (0,621945, 1,86, 0,287042 y 1,607858), que difieren menos de 0,03 % de las de la edición 2001.',
+  '<b>Horas de marcha:</b> el capítulo no fija horas por día para el equipo. El método multiplicativo (carga × 24/h) no proviene de esa fuente. La opción «Ganancias × (24/h − 1), sumado» suma a las ganancias el producto de ellas por (24/h − 1), sin multiplicar la contingencia.',
+  '<b>Psicrometría:</b> presión de saturación según Hyland y Wexler (ASHRAE Fundamentals), contrastada con una tabla de presión de vapor publicada (diferencia máxima 0,1 %). La relación de humedad, la entalpía y el volumen específico usan las constantes de Fundamentals (0,621945, 1,86, 0,287042 y 1,607858).',
+  '<b>Datos climáticos:</b> no están cargados (Fundamentals, cap. 14). La temperatura y la humedad de diseño se ingresan a mano.',
   '<b>No incluido:</b> desescarche, calor de bombas y otras cargas que no se carguen a mano en Otras cargas.'
 ].map(function(t){ return '<li>' + t + '</li>'; }).join('');
 
 buildForm(); fill($('form')); showLogo(); update();
 })();
 </script>
-
 </html>
