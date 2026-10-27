@@ -355,6 +355,22 @@ function prodLoad(p, Tr){
   const emb = p.embMat ? Math.max(0, n(p.embMass)*n(p.embC)*(Ti - To)*1000/(t*3600)) : 0;
   return {kJ, cool, resp, respKJ, respInfo: rd, emb, tot: cool + resp + emb, t};
 }
+// Calor por motor de ventilador (cap. 24, Tabla 6). Ubicación: A motor y ventilador dentro; B motor fuera, ventilador dentro; C motor dentro, ventilador fuera.
+// modo 'placa': potencia nominal de placa, calor de la Tabla 6. modo 'elec': potencia eléctrica absorbida; A = toda, B = absorbida × rendimiento, C = absorbida × (1 − rendimiento).
+function fanUnit(f){
+  const loc = ['A', 'B', 'C'].indexOf(f.loc) >= 0 ? f.loc : 'A';
+  if (f.modo === 'placa'){
+    const hp = parseFloat(f.hp), row = MOTORS.filter(r => r[0] === hp)[0];
+    return row ? {w: row[{A:1, B:2, C:3}[loc]]*BTU_H, loc, src: 'placa', hp} : {w: 0, loc, src: 'placa', missing: true};
+  }
+  if (f.modo === 'elec'){
+    const p = n(f.pel), e = n(f.eta)/100, okE = e > 0 && e <= 1;
+    if (loc === 'A') return {w: p, loc, src: 'elec'};
+    if (!okE) return {w: p, loc, src: 'elec', noEta: true}; // sin rendimiento se toma toda la potencia (lado seguro)
+    return {w: loc === 'B' ? p*e : p*(1 - e), loc, src: 'elec', eta: e};
+  }
+  return {w: n(f.w), loc, src: 'manual'};
+}
 // Cap. 24, ecuaciones 12 y 13 (en SI): carga con flujo pleno por una puerta, kW. A m², dh kJ/kg, densidades kg/m³, H m.
 function doorFlow(A, H, dh, rI, rR){
   if (!(dh > 0 && rR > rI && A > 0)) return 0;
@@ -438,7 +454,7 @@ function calc(S){
 
   const eq = (o, w) => n(o.n)*w*n(o.h)/24;
   const peopleW = n(S.people.w) > 0 ? n(S.people.w) : peopleHeat(Tr);
-  const fans = eq(S.fans, n(S.fans.w)), lights = eq(S.lights, n(S.lights.w)), people = eq(S.people, peopleW);
+  const fanU = fanUnit(S.fans), fans = eq(S.fans, fanU.w), lights = eq(S.lights, n(S.lights.w)), people = eq(S.people, peopleW);
   const miscOther = (S.misc || []).reduce((a, r) => a + n(r.w), 0);
   const misc = people + miscOther;
 
@@ -451,7 +467,7 @@ function calc(S){
   const hrs = (n(c.horas) > 0 && n(c.horas) <= 24) ? n(c.horas) : 24;
   const run = c.metodo === 'sumado' ? G*(24/hrs - 1) : (G + cont)*(24/hrs - 1);
   const total = G + cont + run;
-  return {area, vol, volGeo, volInt, walls, wallsTot, floor, ceil, inf, prod, defrost, fans, lights, people, peopleW, miscOther, misc, parts, G, cont, hrs, run, total, hemi};
+  return {area, vol, volGeo, volInt, walls, wallsTot, floor, ceil, inf, prod, defrost, fans, fanU, lights, people, peopleW, miscOther, misc, parts, G, cont, hrs, run, total, hemi};
 }
 
 function baseWall(o){ return Object.assign({orient:'N', tipo:'ext', tAdj:NaN, width:NaN, mode:'U', U:NaN, mat:'pur', k:0.026, esp:NaN, sol:false, sunSurf:'', dTsol:NaN}, o || {}); }
@@ -466,7 +482,7 @@ function newCase(){
     ceil:{tipo:'ext', tAbove:NaN, mode:'U', U:NaN, mat:'pur', k:0.026, esp:NaN, sol:false, sunSurf:'', dTsol:NaN},
     infil:{metodo:'puertas', td:24, ac:NaN, doors:[baseDoor()]},
     prods:[newProd()], defrost:{w:NaN, n:NaN, min:NaN, frac:100},
-    fans:{n:NaN, w:NaN, h:24, hp:'', loc:'A'}, lights:{n:NaN, w:NaN, h:24}, people:{n:NaN, w:NaN, h:24},
+    fans:{n:NaN, h:24, modo:'elec', pel:NaN, hp:'', loc:'A', eta:NaN}, lights:{n:NaN, w:NaN, h:24}, people:{n:NaN, w:NaN, h:24},
     misc:[]
   };
 }
@@ -541,10 +557,15 @@ var DESOPTS = [['','Elegir o ingresar a mano…']].concat(CITIES.filter(function
 var FLOORMATOPTS = FLOORMATS.map(function(m){ return [m[0], m[1]]; });
 
 var HPOPTS = [['','Elegir…']].concat(MOTORS.map(function(r){ return [String(r[0]), String(r[0]).replace('.', ',') + ' hp']; }));
-var LOCOPTS = [['A','Motor y equipo dentro de la cámara'],['B','Motor fuera, equipo dentro'],['C','Motor dentro, equipo fuera']];
-function motorPick(){
-  return SEL('Motor nominal (Tabla 6)', 'fans.hp', HPOPTS) + SEL('Ubicación', 'fans.loc', LOCOPTS) +
-    '<p class="hint" style="grid-column:1/-1;margin:0">Al elegir el motor se carga el calor de la Tabla 6 del cap. 24 (ASHRAE 2010) como potencia por unidad. Si conocés la potencia eléctrica real, ingresala a mano.</p>';
+var LOCOPTS = [['A','Motor y ventilador dentro de la cámara (evaporador)'],['B','Motor fuera, ventilador dentro'],['C','Motor dentro, ventilador fuera']];
+function fanTile(){
+  return '<div class="tile"><h3>Ventiladores</h3><div class="grid g2">' + F('Cantidad', 'fans.n') + F('Uso', 'fans.h', {u:'h/día'}) +
+    SEL('Dato del motor', 'fans.modo', [['elec','Potencia eléctrica absorbida (catálogo o medida)'],['placa','Potencia de placa (Tabla 6 del ASHRAE)']], {w:true}) +
+    F('Potencia absorbida por unidad', 'fans.pel', {u:'W', w:true, if:'fans.modo=elec'}) +
+    SEL('Motor nominal', 'fans.hp', HPOPTS, {w:true, if:'fans.modo=placa'}) +
+    SEL('Dónde están el motor y el ventilador', 'fans.loc', LOCOPTS, {w:true}) +
+    F('Rendimiento del motor', 'fans.eta', {u:'%', if:'fans.modo=elec&fans.loc!=A'}) +
+    '</div><p class="hint">Potencia absorbida: si el motor está dentro de la cámara, toda la energía eléctrica queda como calor. Si el motor está fuera, entra solo el trabajo del ventilador (absorbida × rendimiento); si el ventilador está fuera, entran solo las pérdidas del motor. La Tabla 6 da rendimientos de 35 % (motores chicos) a 91 % (motores grandes). Potencia de placa: se usa el calor de la Tabla 6 del cap. 24 (ASHRAE 2010) para cada ubicación. No cargues la potencia de placa como absorbida: quedaría corto.</p><p class="calc" id="calc-fans"></p></div>';
 }
 function applyProduct(i, id){
   var P = S.prods[i], p = PROD.filter(function(x){ return x.id === id; })[0];
@@ -553,12 +574,6 @@ function applyProduct(i, id){
   P.name = p.es; P.shA = nz(q.shA); P.shB = nz(q.shB); P.lat = nz(q.lat); P.tFr = nz(q.tFr);
   P.respMode = p.r ? 'min' : 'manual';
   ['name', 'shA', 'shB', 'lat', 'tFr', 'respMode'].forEach(function(f){ sync('prods.' + i + '.' + f); });
-}
-function applyMotor(){
-  var hp = parseFloat(S.fans.hp), row = MOTORS.filter(function(r){ return r[0] === hp; })[0];
-  if (!row) return;
-  var idx = {A: 1, B: 2, C: 3}[S.fans.loc || 'A'];
-  S.fans.w = Math.round(row[idx]*BTU_H*10)/10; sync('fans.w');
 }
 function prodInfoHtml(i){
   var P = S.prods[i], p = PROD.filter(function(x){ return x.id === P.id; })[0], out = [];
@@ -655,9 +670,9 @@ function buildForm(){
   '<p class="hint">Al elegir un producto se cargan sus propiedades del ASHRAE Handbook—Refrigeration 2010 (cap. 19, Tabla 3; pan: cap. 41). Para la respiración, el ASHRAE indica el valor mínimo de la Tabla 9 para almacenamiento en equilibrio y el máximo para el primer o segundo día tras la cosecha (preenfriado y transporte corto). Todos los campos quedan editables. Las propiedades varían con la variedad y la composición: son valores de referencia. Embalajes: el cap. 24 indica calcular la carga de pallets, cajones y embalajes cuando son una parte importante de la masa que ingresa; se enfrían de la temperatura de entrada a la requerida del producto, en el mismo tiempo. El calor específico base sale de Lienhard, A Heat Transfer Textbook (Tablas A.1 y A.2) o de The Engineering ToolBox, según el material.</p><p class="calc" id="calc-prod"></p></section>' +
 
   '<section class="sec"><h2>Equipos, personas y otras cargas</h2><div class="tiles">' +
-    ['fans:Ventiladores:Potencia eléctrica por unidad', 'lights:Iluminación:Potencia por unidad', 'people:Personas:Calor por persona'].map(function(x){
+    fanTile() + ['lights:Iluminación:Potencia por unidad', 'people:Personas:Calor por persona'].map(function(x){
       var a = x.split(':'), k = a[0];
-      return '<div class="tile"><h3>' + a[1] + '</h3><div class="grid g2">' + F('Cantidad', k + '.n') + F(a[2], k + '.w', {u:'W'}) + F('Uso', k + '.h', {u:'h/día'}) + (k === 'fans' ? motorPick() : '') + '</div><p class="calc" id="calc-' + k + '"></p></div>';
+      return '<div class="tile"><h3>' + a[1] + '</h3><div class="grid g2">' + F('Cantidad', k + '.n') + F(a[2], k + '.w', {u:'W'}) + F('Uso', k + '.h', {u:'h/día'}) + '</div><p class="calc" id="calc-' + k + '"></p></div>';
     }).join('') +
     '<div class="tile"><h3>Desescarche</h3><div class="grid g2">' + F('Potencia de desescarche', 'defrost.w', {u:'W'}) + F('Ciclos por día', 'defrost.n') +
       F('Duración por ciclo', 'defrost.min', {u:'min'}) + F('Parte que entra a la cámara', 'defrost.frac', {u:'%'}) +
@@ -733,7 +748,6 @@ $('form').addEventListener('input', function(e){
   var me = /^prods\.(\d+)\.embMat$/.exec(k); if (me){ var pm = packMat(v); if (pm && v !== 'otro'){ setp('prods.' + me[1] + '.embC', pm[2]); sync('prods.' + me[1] + '.embC'); } }
   var pj = /^proj\.(empresa|cliente|proyecto|sitio|calculo)$/.exec(k); if (pj) PRJ.rooms.forEach(function(r){ r.proj[pj[1]] = v; });
   if (k === 'cond.sitio'){ var cs = CITIES.filter(function(x){ return x[0] === v; })[0]; if (cs && cs[5] != null){ S.cond.tAmb = cs[5]; sync('cond.tAmb'); } }
-  if (k === 'fans.hp' || k === 'fans.loc') applyMotor();
   var mm = /^(walls\.\d|floor|ceil)\.mat$/.exec(k);
   if (mm && v !== 'otro'){ setp(mm[1] + '.k', matK(v)); sync(mm[1] + '.k'); }
   var ml = /^(floor\.layers\.\d)\.mat$/.exec(k);
@@ -831,7 +845,9 @@ function update(){
   });
   $('calc-prod').innerHTML = 'Productos: enfriamiento <b>' + f0.format(R.prod.cool) + ' W</b> · respiración <b>' + f0.format(R.prod.resp) + ' W</b> · embalajes <b>' + f0.format(R.prod.emb) + ' W</b>';
   $('calc-defrost').innerHTML = 'Ganancia promedio <b>' + f0.format(R.defrost) + ' W</b>';
-  ['fans', 'lights', 'people'].forEach(function(k){ $('calc-' + k).innerHTML = 'Ganancia <b>' + f0.format(R[k]) + ' W</b>' + (k === 'people' && !(n(S.people.w) > 0) ? ' · ASHRAE <b>' + f0.format(R.peopleW) + ' W</b> por persona' : ''); });
+  var FU = R.fanU, locTxt = {A:'motor y ventilador dentro', B:'motor fuera, ventilador dentro', C:'motor dentro, ventilador fuera'}[FU.loc];
+  $('calc-fans').innerHTML = 'Calor por unidad <b>' + f0.format(FU.w) + ' W</b> (' + (FU.src === 'placa' ? (FU.missing ? 'elegí el motor' : 'Tabla 6, ' + String(FU.hp).replace('.', ',') + ' hp, ' + locTxt) : FU.src === 'elec' ? (FU.loc === 'A' ? 'toda la potencia absorbida, ' + locTxt : FU.noEta ? 'falta el rendimiento: se toma toda la potencia' : (FU.loc === 'B' ? 'absorbida × rendimiento' : 'absorbida × (1 − rendimiento)') + ', ' + locTxt) : 'valor ingresado') + ')<br>Ganancia <b>' + f0.format(R.fans) + ' W</b>';
+  ['lights', 'people'].forEach(function(k){ $('calc-' + k).innerHTML = 'Ganancia <b>' + f0.format(R[k]) + ' W</b>' + (k === 'people' && !(n(S.people.w) > 0) ? ' · ASHRAE <b>' + f0.format(R.peopleW) + ' W</b> por persona' : ''); });
   var mi = minIns(n(S.cond.tRoom)), mh = $('minInsHint');
   if (mh) mh.textContent = mi ? 'Referencia (cap. 24, Tabla 2): espesor mínimo de poliisocianurato expandido recomendado por la industria para ' + f1.format(n(S.cond.tRoom)) + ' °C: ' + f0.format(mi.n) + ' mm en el norte de EE.UU. y ' + f0.format(mi.s) + ' mm en el sur de EE.UU. El manual aclara que puede requerir más espesor por puentes térmicos. No es una norma argentina.' : 'Referencia (cap. 24, Tabla 2): la tabla del ASHRAE cubre cámaras entre −40 y 16 °C aproximadamente.';
   renderWarn(); renderRooms(); autosave();
@@ -884,7 +900,11 @@ function missing(S, R){
     if (p.embMat && !(n(p.embMass) > 0)) add(t + 'masa de embalaje', [b + 'embMass']);
     if (p.embMat && n(p.embMass) > 0 && !(n(p.embC) > 0)) add(t + 'calor específico del embalaje', [b + 'embC']);
   });
-  if (n(S.fans.n) > 0 && !(n(S.fans.w) > 0)) add('Ventiladores: potencia por unidad', ['fans.w']);
+  if (n(S.fans.n) > 0){
+    if (S.fans.modo === 'placa' && !S.fans.hp) add('Ventiladores: motor nominal', ['fans.hp']);
+    if (S.fans.modo === 'elec' && !(n(S.fans.pel) > 0)) add('Ventiladores: potencia absorbida', ['fans.pel']);
+    if (S.fans.modo === 'elec' && S.fans.loc !== 'A' && !(n(S.fans.eta) > 0)) add('Ventiladores: rendimiento del motor (se toma toda la potencia)', ['fans.eta']);
+  }
   if (n(S.lights.n) > 0 && !(n(S.lights.w) > 0)) add('Iluminación: potencia por unidad', ['lights.w']);
   if (n(S.defrost.w) > 0 && !(n(S.defrost.n) > 0 && n(S.defrost.min) > 0)) add('Desescarche: ciclos o duración', bl('defrost.', ['n', 'min']));
   return m;
@@ -1030,6 +1050,7 @@ function normalizeCase(o){
   if (Array.isArray(o.misc)) b.misc = o.misc.map(function(r){ return {desc:r.desc || '', w:r.w == null ? NaN : r.w}; });
   b.prods = Array.isArray(o.prods) && o.prods.length ? o.prods.map(function(p){ return Object.assign(newProd(), p); }) : (o.prod ? [Object.assign(newProd(), o.prod)] : [newProd()]);
   if (b.defrost.frac == null) b.defrost.frac = 100;
+  if (!(o.fans && o.fans.modo)){ var of = o.fans || {}; if (of.hp){ b.fans.modo = 'placa'; } else { b.fans.modo = 'elec'; b.fans.pel = of.w == null ? NaN : of.w; b.fans.loc = 'A'; } }
   return b;
 }
 
@@ -1220,11 +1241,17 @@ function buildPdf(ROOMS, MISS){
   sec('Ventiladores, iluminación y personas');
   table(['', 'Ventiladores', 'Iluminación', 'Personas'], [
     ['Cantidad', f1.format(n(S.fans.n)), f1.format(n(S.lights.n)), f1.format(n(S.people.n))],
-    ['Potencia o calor unitario', f1.format(n(S.fans.w)) + ' W', f1.format(n(S.lights.w)) + ' W', f1.format(R.peopleW) + ' W'],
+    ['Potencia o calor unitario', f1.format(R.fanU.w) + ' W', f1.format(n(S.lights.w)) + ' W', f1.format(R.peopleW) + ' W'],
     ['Uso', f1.format(n(S.fans.h)) + ' h/día', f1.format(n(S.lights.h)) + ' h/día', f1.format(n(S.people.h)) + ' h/día'],
     ['Ganancia total', W(R.fans), W(R.lights), W(R.people)]
   ], 48, [3]);
 
+  if (n(S.fans.n) > 0){
+    var FU = R.fanU, lt = {A:'motor y ventilador dentro de la cámara', B:'motor fuera, ventilador dentro', C:'motor dentro, ventilador fuera'}[FU.loc];
+    doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor.apply(doc, MUT);
+    doc.splitTextToSize('Ventiladores: ' + (FU.src === 'placa' ? 'motor de ' + String(FU.hp).replace('.', ',') + ' hp de placa, calor de la Tabla 6 del cap. 24 (ASHRAE 2010), ' + lt + '.' : FU.src === 'elec' ? 'potencia eléctrica absorbida ' + f0.format(n(S.fans.pel)) + ' W por unidad, ' + lt + (FU.loc === 'A' ? ': toda queda como calor en la cámara.' : FU.noEta ? ': sin rendimiento, se tomó toda la potencia.' : ', rendimiento ' + f0.format(FU.eta*100) + ' %.') : 'calor por unidad ingresado.'), CW).forEach(function(l){ need(5); txt(l, M, y); y += 3.8; });
+    y += 2;
+  }
   if (R.defrost > 0){
     sec('Desescarche');
     kv([['Potencia', f0.format(n(S.defrost.w)) + ' W'], ['Ciclos por día', f1.format(n(S.defrost.n))], ['Duración por ciclo', f0.format(n(S.defrost.min)) + ' min'], ['Parte que entra a la cámara', f0.format(Number.isFinite(S.defrost.frac) ? n(S.defrost.frac) : 100) + ' %'], ['Ganancia promedio', W(R.defrost)]], 2);
