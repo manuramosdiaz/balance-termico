@@ -107,6 +107,10 @@ summary{cursor:pointer;color:var(--accent);font-size:13px;width:max-content}
 .rooms .sep{flex:1 1 auto}
 .warnbox{margin:14px 0 0;padding:10px 12px;border-radius:4px;background:var(--warn-soft);font-size:12.5px}
 .warnbox b{color:var(--warn)}
+.in input.miss,.in select.miss{background:var(--warn-soft);border-color:var(--warn);box-shadow:inset 0 0 0 1px var(--warn)}
+.golink{background:none;border:0;padding:0;color:var(--ink);text-align:left;cursor:pointer;text-decoration:underline;text-decoration-color:var(--warn);text-underline-offset:2px;font:inherit}
+.golink:hover{color:var(--warn)}
+.rtab .wn{color:var(--warn);font-weight:600;margin-left:6px}
 .warnbox ul{margin:6px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:2px}
 .projsum{margin:14px 0 0;padding:10px 12px;border:1px solid var(--line);border-radius:4px;font-size:12.5px}
 .projsum dl{margin:6px 0 0;display:grid;grid-template-columns:1fr auto;gap:3px 10px}
@@ -607,7 +611,7 @@ function buildForm(){
     F('Cliente', 'proj.cliente', {t:'text'}) + F('Proyecto', 'proj.proyecto', {t:'text'}) +
     F('Sitio', 'proj.sitio', {t:'text'}) + F('Nombre de la cámara', 'proj.sala', {t:'text'}) +
     F('Calculó', 'proj.calculo', {t:'text'}) +
-  '</div><div class="logo"><label class="btn quiet" style="display:inline-flex;align-items:center;cursor:pointer">Subir logo<input type="file" id="logoFile" accept="image/*" hidden></label><img id="logoPrev" alt="Logo cargado" hidden><button class="btn quiet" id="logoDel" type="button" hidden>Quitar logo</button><span class="hint" style="margin:0">El logo queda guardado en este navegador y sale en el encabezado del PDF.</span></div></section>' +
+  '</div><div class="logo"><label class="btn quiet" style="display:inline-flex;align-items:center;cursor:pointer">Subir logo<input type="file" id="logoFile" accept="image/*" hidden></label><img id="logoPrev" alt="Logo cargado" hidden><button class="btn quiet" id="logoDel" type="button" hidden>Quitar logo</button><span class="hint" style="margin:0">El logo queda guardado en este navegador y sale en el encabezado del PDF. Con logo cargado, el nombre de la empresa no se repite al lado.</span></div></section>' +
 
   '<section class="sec"><h2>Condiciones de diseño</h2><div class="grid">' +
     SEL('Sitio: cargar temperatura de diseño de verano', 'cond.sitio', DESOPTS, {w:true}) + F('Temperatura ambiente', 'cond.tAmb', {u:'°C'}) + F('HR ambiente', 'cond.rhAmb', {u:'%'}) +
@@ -838,66 +842,82 @@ function update(){
 /* ---------- datos faltantes ---------- */
 function blank(v){ return v == null || v === '' || !Number.isFinite(+v); }
 function missing(S, R){
-  var m = [], c = S.cond;
-  if (blank(c.tAmb)) m.push('Temperatura ambiente');
-  if (blank(c.tRoom)) m.push('Temperatura de la cámara');
+  // Cada faltante: texto y campos a marcar en amarillo
+  var m = [], c = S.cond, add = function(t, k){ m.push({t: t, k: k || []}); };
+  var bl = function(base, fs){ return fs.filter(function(f){ return blank(getpOf(S, base + f)); }).map(function(f){ return base + f; }); };
+  if (blank(c.tAmb)) add('Temperatura ambiente', ['cond.tAmb']);
+  if (blank(c.tRoom)) add('Temperatura de la cámara', ['cond.tRoom']);
   var air = S.infil.metodo === 'ac' ? n(S.infil.ac) > 0 : S.infil.doors.some(function(d){ return n(d.w)*n(d.h) > 0; });
-  if (air && blank(c.rhAmb)) m.push('HR ambiente (la infiltración la toma como 0 %)');
-  if (air && blank(c.rhRoom)) m.push('HR de la cámara (la infiltración la toma como 0 %)');
-  if (blank(c.horas)) m.push('Horas de marcha (se toman 24 h)');
-  if (blank(c.cont)) m.push('Contingencia (el ASHRAE recomienda 10 %)');
-  [['L','Largo'],['W','Ancho'],['H','Alto']].forEach(function(x){ if (!(n(S.geo[x[0]]) > 0)) m.push(x[1] + ' de la cámara'); });
+  if (air && blank(c.rhAmb)) add('HR ambiente (la infiltración la toma como 0 %)', ['cond.rhAmb']);
+  if (air && blank(c.rhRoom)) add('HR de la cámara (la infiltración la toma como 0 %)', ['cond.rhRoom']);
+  if (blank(c.horas)) add('Horas de marcha (se toman 24 h)', ['cond.horas']);
+  if (blank(c.cont)) add('Contingencia (el ASHRAE recomienda 10 %)', ['cond.cont']);
+  [['L','Largo'],['W','Ancho'],['H','Alto']].forEach(function(x){ if (!(n(S.geo[x[0]]) > 0)) add(x[1] + ' de la cámara', ['geo.' + x[0]]); });
+  var insK = function(p, s){ return s.mode === 'mat' ? bl(p + '.', ['esp', 'k']) : [p + '.U']; };
   S.walls.forEach(function(w, i){
-    var t = 'Pared ' + (i + 1) + ': ';
-    if (!(R.walls[i].U > 0)) m.push(t + 'aislación (U = 0)');
-    if (w.tipo === 'int' && blank(w.tAdj)) m.push(t + 'temperatura del lado opuesto');
-    if (w.tipo === 'ext' && w.sol && !w.sunSurf) m.push(t + 'tipo de superficie al sol');
+    var t = 'Pared ' + (i + 1) + ': ', p = 'walls.' + i;
+    if (!(n(w.width) > 0)) add(t + 'ancho', [p + '.width']);
+    if (!(R.walls[i].U > 0)) add(t + 'aislación (U = 0)', insK(p, w));
+    if (w.tipo === 'int' && blank(w.tAdj)) add(t + 'temperatura del lado opuesto', [p + '.tAdj']);
+    if (w.tipo === 'ext' && w.sol && !w.sunSurf) add(t + 'tipo de superficie al sol', [p + '.sunSurf']);
   });
-  if (!(R.floor.U > 0)) m.push('Piso: espesores de las capas');
-  if (blank(S.floor.tBelow)) m.push('Piso: temperatura bajo el piso');
-  if (!(R.ceil.U > 0)) m.push('Techo: aislación (U = 0)');
-  if (S.ceil.tipo === 'int' && blank(S.ceil.tAbove)) m.push('Techo: temperatura sobre el techo');
-  if (S.ceil.tipo === 'ext' && S.ceil.sol && !S.ceil.sunSurf) m.push('Techo: tipo de superficie al sol');
-  if (S.infil.metodo === 'ac'){ if (!(n(S.infil.ac) > 0)) m.push('Cambios de aire'); }
+  if (!(R.floor.U > 0)) add('Piso: espesores de las capas', [].concat.apply([], S.floor.layers.map(function(l, j){ return bl('floor.layers.' + j + '.', ['esp', 'k']); })));
+  if (blank(S.floor.tBelow)) add('Piso: temperatura bajo el piso', ['floor.tBelow']);
+  if (!(R.ceil.U > 0)) add('Techo: aislación (U = 0)', insK('ceil', S.ceil));
+  if (S.ceil.tipo === 'int' && blank(S.ceil.tAbove)) add('Techo: temperatura sobre el techo', ['ceil.tAbove']);
+  if (S.ceil.tipo === 'ext' && S.ceil.sol && !S.ceil.sunSurf) add('Techo: tipo de superficie al sol', ['ceil.sunSurf']);
+  if (S.infil.metodo === 'ac'){ if (!(n(S.infil.ac) > 0)) add('Cambios de aire', ['infil.ac']); }
   else S.infil.doors.forEach(function(d, i){
-    var t = 'Puerta ' + (i + 1) + ': ';
-    if (!(n(d.w)*n(d.h) > 0)) m.push(t + 'medidas');
-    else if (!(R.inf.doors[i].Dt > 0)) m.push(t + 'uso (pasadas o tiempo abierta)');
-    if (d.fd && !(n(d.V) > 0 && n(d.dd) > 0)) m.push(t + 'velocidad o fracción del flujo directo');
+    var t = 'Puerta ' + (i + 1) + ': ', p = 'infil.doors.' + i + '.';
+    if (!(n(d.w)*n(d.h) > 0)) add(t + 'medidas', bl(p, ['w', 'h']));
+    else if (!(R.inf.doors[i].Dt > 0)) add(t + 'uso (pasadas o tiempo abierta)', bl(p, ['P', 'tp', 'to']));
+    if (d.fd && !(n(d.V) > 0 && n(d.dd) > 0)) add(t + 'velocidad o fracción del flujo directo', bl(p, ['V', 'dd']));
   });
   S.prods.forEach(function(p, i){
-    var t = 'Producto ' + (i + 1) + (p.name ? ' (' + p.name + ')' : '') + ': ';
+    var t = 'Producto ' + (i + 1) + (p.name ? ' (' + p.name + ')' : '') + ': ', b = 'prods.' + i + '.';
     if (n(p.mass) > 0){
-      if (blank(p.tIn) || blank(p.tOut)) m.push(t + 'temperaturas de entrada o requerida');
-      else if (n(p.tIn) > n(p.tFr) && !(n(p.shA) > 0)) m.push(t + 'calor específico sobre congelación');
-      if (!blank(p.tOut) && n(p.tOut) < n(p.tFr) && !(n(p.lat) > 0 && n(p.shB) > 0)) m.push(t + 'calor latente o calor específico bajo congelación');
+      if (blank(p.tIn) || blank(p.tOut)) add(t + 'temperaturas de entrada o requerida', bl(b, ['tIn', 'tOut']));
+      else if (n(p.tIn) > n(p.tFr) && !(n(p.shA) > 0)) add(t + 'calor específico sobre congelación', [b + 'shA']);
+      if (!blank(p.tOut) && n(p.tOut) < n(p.tFr) && !(n(p.lat) > 0 && n(p.shB) > 0)) add(t + 'calor latente o calor específico bajo congelación', bl(b, ['lat', 'shB']));
     }
-    if (p.embMat && !(n(p.embMass) > 0)) m.push(t + 'masa de embalaje');
-    if (p.embMat && n(p.embMass) > 0 && !(n(p.embC) > 0)) m.push(t + 'calor específico del embalaje');
+    if (n(p.stored) > 0 && p.respMode === 'manual' && blank(p.resp)) add(t + 'calor de respiración (vacío = 0)', [b + 'resp']);
+    if (p.embMat && !(n(p.embMass) > 0)) add(t + 'masa de embalaje', [b + 'embMass']);
+    if (p.embMat && n(p.embMass) > 0 && !(n(p.embC) > 0)) add(t + 'calor específico del embalaje', [b + 'embC']);
   });
-  if (n(S.fans.n) > 0 && !(n(S.fans.w) > 0)) m.push('Ventiladores: potencia por unidad');
-  if (n(S.lights.n) > 0 && !(n(S.lights.w) > 0)) m.push('Iluminación: potencia por unidad');
-  if (n(S.defrost.w) > 0 && !(n(S.defrost.n) > 0 && n(S.defrost.min) > 0)) m.push('Desescarche: ciclos o duración');
+  if (n(S.fans.n) > 0 && !(n(S.fans.w) > 0)) add('Ventiladores: potencia por unidad', ['fans.w']);
+  if (n(S.lights.n) > 0 && !(n(S.lights.w) > 0)) add('Iluminación: potencia por unidad', ['lights.w']);
+  if (n(S.defrost.w) > 0 && !(n(S.defrost.n) > 0 && n(S.defrost.min) > 0)) add('Desescarche: ciclos o duración', bl('defrost.', ['n', 'min']));
   return m;
 }
+function getpOf(obj, path){ return path.split('.').reduce(function(o, k){ return o == null ? o : o[k]; }, obj); }
 function roomName(r, i){ return (r.proj.sala && String(r.proj.sala).trim()) || ('Cámara ' + (i + 1)); }
 function allMissing(){
   var out = [];
-  PRJ.rooms.forEach(function(r, i){ var rr = r === S ? R : calc(r); missing(r, rr).forEach(function(t){ out.push(PRJ.rooms.length > 1 ? roomName(r, i) + ' · ' + t : t); }); });
+  PRJ.rooms.forEach(function(r, i){ var rr = r === S ? R : calc(r); missing(r, rr).forEach(function(x){ out.push(PRJ.rooms.length > 1 ? roomName(r, i) + ' · ' + x.t : x.t); }); });
   return out;
 }
+function hasData(S){ return !blank(S.cond.tAmb) || !blank(S.cond.tRoom) || n(S.geo.L) > 0 || n(S.geo.W) > 0; }
 function renderWarn(){
-  var el = $('warnBox'), m = missing(S, R);
-  if (R.G === 0 || !m.length){ el.hidden = true; return; }
+  var el = $('warnBox'), m = missing(S, R), show = (R.G !== 0 || hasData(S)) && m.length > 0;
+  document.querySelectorAll('#form .miss').forEach(function(x){ x.classList.remove('miss'); });
+  if (!show){ el.hidden = true; return; }
+  m.forEach(function(x){ x.k.forEach(function(k){ var f = document.querySelector('#form [data-k="' + k + '"]'); if (f) f.classList.add('miss'); }); });
   el.hidden = false;
-  el.innerHTML = '<b>Datos sin cargar (' + m.length + ')</b>: un campo vacío cuenta como 0.<ul>' + m.map(function(t){ return '<li>' + E(t) + '</li>'; }).join('') + '</ul>';
+  el.innerHTML = '<b>Datos sin cargar (' + m.length + ')</b>: un campo vacío cuenta como 0. Están marcados en amarillo; tocá uno para ir al campo.<ul>' +
+    m.map(function(x){ return '<li><button type="button" class="golink" data-goto="' + E(x.k[0] || '') + '">' + E(x.t) + '</button></li>'; }).join('') + '</ul>';
 }
+$('warnBox').addEventListener('click', function(e){
+  var b = e.target.closest('[data-goto]'); if (!b || !b.dataset.goto) return;
+  var f = document.querySelector('#form [data-k="' + b.dataset.goto + '"]'); if (!f) return;
+  var d = f.closest('details'); if (d) d.open = true;
+  f.scrollIntoView({block:'center'}); f.focus({preventScroll:true});
+});
 /* ---------- cámaras del proyecto ---------- */
 function renderRooms(){
   var el = $('rooms'), tot = 0;
   var totals = PRJ.rooms.map(function(r){ var t = r === S ? R.total : calc(r).total; tot += t; return t; });
   el.innerHTML = PRJ.rooms.map(function(r, i){
-    return '<button type="button" class="rtab' + (i === PRJ.cur ? ' on' : '') + '" data-room="' + i + '"' + (i === PRJ.cur ? ' aria-current="true"' : '') + '>' + E(roomName(r, i)) + '<small>' + f1.format(totals[i]/1000) + ' kW</small></button>';
+    return '<button type="button" class="rtab' + (i === PRJ.cur ? ' on' : '') + '" data-room="' + i + '"' + (i === PRJ.cur ? ' aria-current="true"' : '') + '>' + E(roomName(r, i)) + '<small>' + f1.format(totals[i]/1000) + ' kW</small>' + (function(){ var rr = r === S ? R : calc(r), k = missing(r, rr).length; return (rr.G !== 0 || hasData(r)) && k ? '<span class="wn" title="Datos sin cargar">⚠ ' + k + '</span>' : ''; })() + '</button>';
   }).join('') + '<span class="sep"></span><button type="button" class="btn quiet" id="roomAdd">Agregar cámara</button><button type="button" class="btn quiet" id="roomDup">Duplicar</button>' +
     (PRJ.rooms.length > 1 ? '<button type="button" class="btn quiet" id="roomDel">Quitar esta cámara</button>' : '');
   var ps = $('projSum');
@@ -1034,7 +1054,10 @@ function buildPdf(ROOMS, MISS){
   var jsPDF = window.jspdf.jsPDF, doc = new jsPDF({unit:'mm', format:'a4'});
   var M = 15, CW = 180, y = 0;
   var INK = [15,30,43], MUT = [88,105,118], ACC = [11,107,168], LN = [201,213,221];
-  var txt = function(s, x, yy, o){ doc.text(String(s), x, yy, o || {}); };
+  // La fuente estándar del PDF no dibuja superíndices ni algunos signos: se reemplazan
+  var pdfSafe = function(s){ return String(s).replace(/²/g, '2').replace(/³/g, '3').replace(/[−–]/g, '-').replace(/Δ/g, 'dif. ').replace(/≈/g, '~').replace(/⁻⁷/g, 'e-7'); };
+  var txt = function(s, x, yy, o){ doc.text(pdfSafe(s), x, yy, o || {}); };
+  var ALLNOTES = [];
   function flake(cx, cy, r){
     doc.setDrawColor.apply(doc, ACC); doc.setLineWidth(0.45);
     [0, 60, 120].forEach(function(a){
@@ -1051,7 +1074,8 @@ function buildPdf(ROOMS, MISS){
 
     if (LOGO){ var h = 12, w = Math.min(42, h*LOGO.w/LOGO.h); doc.addImage(LOGO.data, 'PNG', M, 9, w, w*LOGO.h/LOGO.w > h ? h : w*LOGO.h/LOGO.w); x = M + w + 4; }
     else { flake(M + 6, 15, 5.5); x = M + 15; }
-    if (S.proj.empresa){ doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.setTextColor.apply(doc, INK); txt(S.proj.empresa, x, 15); }
+    // Con logo cargado no se repite el nombre de la empresa al lado (el logo ya lo lleva)
+    if (S.proj.empresa && !LOGO){ doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.setTextColor.apply(doc, INK); txt(S.proj.empresa, x, 15); }
     doc.setFont('helvetica','bold'); doc.setFontSize(14); doc.setTextColor.apply(doc, ACC); txt('Balance térmico de cámara', M + CW, 14, {align:'right'});
     doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor.apply(doc, MUT); txt('Informe completo · ' + longDate(), M + CW, 19.5, {align:'right'});
     doc.setDrawColor.apply(doc, LN); doc.setLineWidth(0.3); doc.line(M, 24, M + CW, 24);
@@ -1059,7 +1083,7 @@ function buildPdf(ROOMS, MISS){
   }
   function need(h){ if (y + h > 280){ doc.addPage(); head(); } }
   function sec(t){
-    need(16); y += 3; doc.setFont('helvetica','bold'); doc.setFontSize(9.5); doc.setTextColor.apply(doc, ACC); txt(t.toUpperCase(), M, y);
+    need(32); y += 3; doc.setFont('helvetica','bold'); doc.setFontSize(9.5); doc.setTextColor.apply(doc, ACC); txt(t.toUpperCase(), M, y);
     doc.setDrawColor.apply(doc, LN); doc.line(M, y + 1.8, M + CW, y + 1.8); y += 7;
   }
   function kv(rows, cols){
@@ -1097,6 +1121,9 @@ function buildPdf(ROOMS, MISS){
   if (ROOMS.length > 1){ head(); projectSummary(); }
   ROOMS.forEach(function(rm, ri){ S = rm.S; R = rm.R; if (ROOMS.length > 1) doc.addPage(); head(); roomBody(rm, ri); });
   var lastS = S;
+  need(40); y += 4; sec('Notas y fuentes');
+  doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor.apply(doc, MUT);
+  ALLNOTES.forEach(function(t){ var ls = doc.splitTextToSize(pdfSafe(t), CW); ls.forEach(function(l){ need(5); txt(l, M, y); y += 3.8; }); y += 1; });
   if (MISS && MISS.length){
     S = lastS; need(14); sec('Datos sin cargar al generar el informe');
     doc.setFont('helvetica','normal'); doc.setFontSize(8.4); doc.setTextColor(143, 86, 0);
@@ -1204,9 +1231,18 @@ function buildPdf(ROOMS, MISS){
   }
   if (S.misc.length){
     sec('Otras cargas');
-    kv(S.misc.map(function(r, i){ return [r.desc || ('Carga ' + (i + 1)), W(n(r.w))]; }).concat([['Total personas y otras cargas', W(R.misc)]]), 2);
+    S.misc.forEach(function(r, i){
+      var ls = doc.splitTextToSize(pdfSafe(r.desc || ('Carga ' + (i + 1))), CW - 40);
+      need(ls.length*4.2 + 2);
+      doc.setFont('helvetica','normal'); doc.setFontSize(8.6); doc.setTextColor.apply(doc, MUT);
+      ls.forEach(function(l, li){ txt(l, M, y + li*4.2); });
+      doc.setFont('helvetica','bold'); doc.setTextColor.apply(doc, INK); txt(W(n(r.w)), M + CW, y, {align:'right'});
+      y += ls.length*4.2 + 1.6;
+    });
+    kv([['Total personas y otras cargas', W(R.misc)]], 1);
   }
 
+  need((R.parts.length + 4)*5.4 + R.parts.filter(function(p){ return p[1] > 0; }).length*4.6 + 52);
   sec('Resumen de cargas');
   table(['Partida', 'Carga', 'Participación'], R.parts.map(function(p){ return [p[0], W(p[1]), R.G > 0 ? f1.format(p[1]/R.G*100) + ' %' : '-']; }).concat([
     ['Total de ganancias', W(R.G), '100 %'],
@@ -1232,8 +1268,6 @@ function buildPdf(ROOMS, MISS){
   txt(f2.format(R.total/1000) + ' kW  ·  ' + f0.format(R.total*0.859845) + ' kcal/h  ·  ' + f2.format(R.total/3516.85) + ' TR', M + CW - 4, y + 12, {align:'right'});
   y += 20;
 
-  need(30);
-  doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor.apply(doc, MUT);
   var notes = [
     'Fuente de tablas y ecuaciones: ASHRAE Handbook - Refrigeration, edición 2010, capítulos 19 (propiedades de alimentos), 23, 24 (cargas) y 41 (pan), convertidos de unidades inglesas a SI. Psicrometría: fórmulas de ASHRAE Handbook - Fundamentals.',
     (function(){ var cs = CITIES.filter(function(x){ return x[0] === C.sitio; })[0]; return cs && cs[5] != null && n(C.tAmb) === cs[5] ? 'Temperatura exterior: ' + String(cs[5]).replace('.', ',') + ' °C, TDMX de IRAM 11603 (borrador 2011, estación ' + cs[6] + '), percentil 99 de las máximas diarias de diciembre a marzo. Es una referencia: el ASHRAE pide los valores de diseño del 0,4 % (Fundamentals, cap. 14).' : ''; })(),
@@ -1248,7 +1282,7 @@ function buildPdf(ROOMS, MISS){
     R.defrost > 0 ? 'Desescarche: potencia x ciclos x duración, promediado en 24 h, por la parte que entra a la cámara (dato ingresado; el ASHRAE no da ese porcentaje).' : '',
     'Los nombres de productos en español son traducción propia de los nombres del manual.'
   ];
-  notes.filter(Boolean).forEach(function(t){ var ls = doc.splitTextToSize(t, CW); ls.forEach(function(l){ need(5); txt(l, M, y); y += 3.8; }); y += 1; });
+  notes.filter(Boolean).forEach(function(t){ if (ALLNOTES.indexOf(t) < 0) ALLNOTES.push(t); });
 
   }
 
